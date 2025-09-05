@@ -1,0 +1,11 @@
+Host WCSP-LAB-01
+  HostName 192.168.30.101
+  User alab
+  Port 22
+  IdentityFile ~/.ssh/id_rsa
+
+Host WCSP-LAB-02
+  HostName 192.168.30.102
+  User alab
+  Port 22
+  IdentityFile ~/.ssh/id_rsa
