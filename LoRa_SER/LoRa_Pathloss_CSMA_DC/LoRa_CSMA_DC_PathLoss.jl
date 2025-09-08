@@ -1,4 +1,4 @@
-using Random, FFTW, Statistics, Printf, DelimitedFiles, LinearAlgebra
+using Random, FFTW, Statistics, Printf, DelimitedFiles, LinearAlgebra, StatsBase, Distributed
 
 # ===== パラメータ設定 =====
 # エリアサイズ(km)
@@ -20,7 +20,7 @@ const f_c = 923.2
 const shadowing_std = 3.48
 
 # 送信電力(dBm)
-const Tx_dB = 13
+const Tx_dB = 13.0
 
 # 雑音指数[dB]
 const noise_figure = 10
@@ -66,7 +66,7 @@ function demod_lora(sf::Int, bw::Float64, x::AbstractVector{ComplexF64})
 end
 
 # AWGN付加
-function add_awgn!(y::Vector{ComplexF64}, snr_dB::Float64)
+function add_awgn!(y::AbstractVector{ComplexF64}, snr_dB::Float64)
     var = 10^(-snr_dB/10)
     σ = sqrt(var/2)
     @inbounds for i in eachindex(y)
@@ -74,6 +74,51 @@ function add_awgn!(y::Vector{ComplexF64}, snr_dB::Float64)
     end
     return y
 end
+
+using Plots
+# プロットバックエンドを設定（GUI表示用）
+try
+    gr()  # GRバックエンドを使用
+catch
+    # GRが利用できない場合はデフォルトを使用
+    println("GRバックエンドが利用できません。デフォルトバックエンドを使用します。")
+end
+
+# 端末配置を可視化
+function plot_node_positions(node_positions, device_sfs)
+    xs = [pos[1] for pos in node_positions]
+    ys = [pos[2] for pos in node_positions]
+
+    # SFごとに色分け
+    p = scatter(xs, ys,
+        group = device_sfs,
+        xlabel = "X [km]", ylabel = "Y [km]",
+        title = "LoRa Node Distribution (by SF)",
+        legend = :outertopright,
+        markersize = 6)
+
+    # ゲートウェイを赤い星印でプロット
+    scatter!(p, [0.0], [0.0], markershape = :star5, color = :red, label = "Gateway", markersize = 10)
+    
+    # プロット情報を表示
+    println("端末配置プロットを生成中...")
+    println("総端末数: $(length(node_positions))")
+    println("SF分布: $(countmap(device_sfs))")
+    
+    # プロットを表示
+    display(p)
+    
+    # プロットをファイルに保存
+    save_path = "LoRa_SER/CSMA_DC/node_positions_plot.png"
+    if !isdir(dirname(save_path))
+        mkpath(dirname(save_path))
+    end
+    savefig(p, save_path)
+    println("プロットを保存しました: $save_path")
+    
+    return p
+end
+
 
 # ===== 伝搬モデル関数 =====
 function distance(x1, y1, x2, y2)
@@ -95,6 +140,7 @@ function received_power(tx_power_dBm::Float64, distance_km::Float64, shadowing_d
     pl = path_loss(distance_km)
     return tx_power_dBm - pl - shadowing_dB
 end
+
 
 function snr_threshold(sf::Int)
     # SFに対応するSNR閾値を取得
@@ -175,8 +221,10 @@ function csma_dc_per_enhanced(sf::Int, bw::Float64, num_devices::Int;
     payload_lens = rand(rng, payload_range[1]:payload_range[2], num_devices)
     payloads = [rand(rng, 0:M-1, payload_lens[d]) for d in 1:num_devices]
 
-    # 受信バッファ
-    total_samples = Int(ceil(sim_time*fs)) + maximum(payload_lens)*M
+    # 受信バッファ（安全な計算）
+    base_samples = Int(ceil(sim_time*fs))
+    max_payload_samples = maximum(payload_lens) * M
+    total_samples = min(base_samples + max_payload_samples, 10^7)  # 最大1000万サンプルに制限
     rx_signal = zeros(ComplexF64, total_samples)
     channel_busy = falses(total_samples)
 
@@ -214,10 +262,18 @@ function csma_dc_per_enhanced(sf::Int, bw::Float64, num_devices::Int;
                 n1 = n0 + device_M - 1
             end
 
-            if n1 <= total_samples
-                channel_busy[n0:n1] .= true
-                @inbounds for i in 1:device_M
-                    rx_signal[n0+i-1] += wave[i]
+            if n1 <= total_samples && n0 >= 1
+                # 境界チェックを追加
+                if n0 <= length(channel_busy) && n1 <= length(channel_busy)
+                    channel_busy[n0:n1] .= true
+                end
+                if n0 <= length(rx_signal) && n1 <= length(rx_signal)
+                    for i in 1:device_M
+                        idx = n0 + i - 1
+                        if idx >= 1 && idx <= length(rx_signal) && i <= length(wave)
+                            rx_signal[idx] += wave[i]
+                        end
+                    end
                 end
                 if s==1; first_start=n0; end
                 push!(tx_indices[d], n0)
@@ -246,9 +302,12 @@ function csma_dc_per_enhanced(sf::Int, bw::Float64, num_devices::Int;
             device_sf = device_sfs[d]
             device_M = 2^device_sf
             for start_idx in tx_indices[d]
-                if start_idx + device_M - 1 <= total_samples
-                    signal_segment = @view rx_signal[start_idx:start_idx+device_M-1]
-                    add_awgn!(signal_segment, snr)
+                if start_idx + device_M - 1 <= total_samples && start_idx >= 1
+                    end_idx = start_idx + device_M - 1
+                    if end_idx <= length(rx_signal)
+                        signal_segment = @view rx_signal[start_idx:end_idx]
+                        add_awgn!(signal_segment, snr)
+                    end
                 end
             end
         end
@@ -260,18 +319,21 @@ function csma_dc_per_enhanced(sf::Int, bw::Float64, num_devices::Int;
         device_sf = device_sfs[d]
         device_M = 2^device_sf
         for (s,start) in enumerate(tx_indices[d])
-            if start + device_M - 1 <= total_samples
-                y = @view rx_signal[start:start+device_M-1]
-                m_hat = demod_lora(device_sf, bw, y)
-                if m_hat != payloads[d][s]
-                    errors[d] = true
-                    break
+            if start + device_M - 1 <= total_samples && start >= 1
+                end_idx = start + device_M - 1
+                if end_idx <= length(rx_signal) && s <= length(payloads[d])
+                    y = @view rx_signal[start:end_idx]
+                    m_hat = demod_lora(device_sf, bw, y)
+                    if m_hat != payloads[d][s]
+                        errors[d] = true
+                        break
+                    end
                 end
             end
         end
     end
 
-    return mean(Float64.(errors)), node_positions, device_sfs, shadowing_values
+    return mean(Float64.(errors)), node_positions, device_sfs, shadowing_values, errors
 end
 
 # ===== 結果分析関数 =====
@@ -318,7 +380,8 @@ function run_per_sweep_enhanced(sf::Int, bw::Float64,
     dc::Float64=0.01,
     iter::Int=100,
     seed::Int=1234,
-    save_path::String="LoRa_PER_enhanced.csv")
+    save_path::String="LoRa_PER_enhanced.csv",
+    use_parallel::Bool=false)
 
     rng = MersenneTwister(seed)
     snrs = collect(snr_min:snr_step:snr_max)
@@ -331,21 +394,39 @@ function run_per_sweep_enhanced(sf::Int, bw::Float64,
         acc = 0.0
         all_stats = []
         
-        for it in 1:iter
-            per, positions, sfs, shadowing = csma_dc_per_enhanced(sf, bw, num_devices;
-                                           payload_range=payload_range,
-                                           sim_time=sim_time,
-                                           backoff_max=backoff_max,
-                                           dc=dc,
-                                           rng=rng)
-            acc += per
-            
-            # 詳細分析（最初の数回のみ）
-            if it <= 5
-                # エラー情報を生成（簡易版）
-                errors = rand(rng, num_devices) .< per
-                stats = analyze_results(positions, sfs, shadowing, errors)
-                push!(all_stats, stats)
+        if use_parallel && nprocs() > 1
+            # 並列処理を使用（各反復を独立して実行）
+            per_results = @distributed (+) for it in 1:iter
+                local_rng = MersenneTwister(seed + it + i * 1000)
+                per, positions, sfs, shadowing, errors = csma_dc_per_enhanced(sf, bw, num_devices;
+                                               payload_range=payload_range,
+                                               sim_time=sim_time,
+                                               backoff_max=backoff_max,
+                                               dc=dc,
+                                               rng=local_rng)
+                per
+            end
+            acc = per_results
+        else
+            # シーケンシャル処理
+            for it in 1:iter
+                # 各反復で独立したRNGを使用
+                local_rng = MersenneTwister(seed + it + i * 1000)
+                per, positions, sfs, shadowing, errors = csma_dc_per_enhanced(sf, bw, num_devices;
+                                               payload_range=payload_range,
+                                               sim_time=sim_time,
+                                               backoff_max=backoff_max,
+                                               dc=dc,
+                                               rng=local_rng)
+                acc += per
+                
+                # 詳細分析（最初の数回のみ）
+                if it <= 5
+                    # エラー情報を生成（簡易版）
+                    errors = rand(local_rng, num_devices) .< per
+                    stats = analyze_results(positions, sfs, shadowing, errors)
+                    push!(all_stats, stats)
+                end
             end
         end
         
@@ -400,6 +481,15 @@ bw = 125e3
 num_devices = 50
 snr_min, snr_max, snr_step = -10.0, 0.0, 1.0
 iter = 50   # 反復回数
+
+per, positions, sfs, shadowing, errors = csma_dc_per_enhanced(sf, bw, num_devices;
+                                   payload_range=(16,32),
+                                   sim_time=1.0,
+                                   backoff_max=0.01,
+                                   dc=0.01,
+                                   )
+
+plot_node_positions(positions, sfs)
 
 snrs, per_vals, detailed_results = run_per_sweep_enhanced(sf, bw, num_devices,
                                snr_min, snr_max, snr_step;
