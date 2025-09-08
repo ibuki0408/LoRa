@@ -1,14 +1,13 @@
-# LoRa_Pathloss_CSMA_DC フォルダ
+# LoRa シンプルモデル
 
 ## 概要
-このフォルダには、LoRa通信のパスロス、CSMA/CA、デューティサイクル制約を考慮したシミュレーションモデルが含まれています。複雑な要素を排除し、以下の基本機能に焦点を当てたシンプルなモデルです：
+このモデルは、LoRa通信の基本的な要素を含むシンプルなシミュレーションモデルです。複雑な要素を排除し、以下の基本機能に焦点を当てています：
 
 - **固定SF値**: 全端末が同じSF（Spreading Factor）を使用
 - **CSMA/CA**: キャリアセンス多重アクセス/衝突回避
 - **DC制約**: デューティサイクル制約
 - **ポアソン点過程**: 端末のランダム配置
 - **パスロス**: 距離に基づく伝搬損失
-- **SNRスイープ**: 各SNR値でのSER/PER計算
 
 ## 主な特徴
 
@@ -85,64 +84,23 @@ per, positions, snrs, errors = simple_csma_dc_per(
 - 平均SNR
 - SNR範囲
 
-### 2. SNRスイープ結果（CSV）
-- **ファイル**: `results_simple_model/snr_sweep_ser_sf7_dev50.csv`
-- **内容**: 
-  - SNR_dB: SNR値（-20.0 ~ 0.0 dB、0.5 dBステップ）
-  - SER: シンボルエラー率
-  - PER: パケットエラー率
-- **用途**: 数値解析、グラフ作成
-
-### 3. 可視化
+### 2. 可視化
 - 端末配置プロット（エラー状態で色分け）
 - ゲートウェイ位置の表示
 - PNG形式で保存
 
-### 4. 統計分析
+### 3. 統計分析
 - 複数回実行による統計
 - 平均PER、標準偏差
 - 最小・最大PER
 
-## フォルダ構成
+## ファイル構成
 
 ```
-LoRa_Pathloss_CSMA_DC/
-├── LoRa_Simple_Model.jl                    # メインシミュレーションファイル（シンプル版）
-├── LoRa_CSMA_DC_PathLoss.jl               # 複雑なシミュレーションファイル（元版）
-├── README_Simple_Model.md                 # このファイル
-└── results_simple_model/                  # 結果保存ディレクトリ
-    ├── simple_model_plot.png              # 端末配置プロット
-    ├── snr_sweep_ser_sf7_dev50.csv        # SNRスイープ結果（CSV）
-    └── ser_vs_snr_sf7_dev50.png           # SER/PER vs SNRプロット（削除済み）
+LoRa_Simple_Model.jl          # メインシミュレーションファイル
+README_Simple_Model.md        # このファイル
+simple_model_plot.png         # 生成されるプロットファイル
 ```
-
-## ファイル詳細
-
-### 1. LoRa_Simple_Model.jl
-- **目的**: シンプルなLoRaシミュレーションモデル
-- **特徴**: 
-  - 固定SF値（SF7）
-  - ポアソン点過程による端末配置
-  - CSMA/CA + DC制約
-  - パスロス考慮
-  - SNRスイープ機能（SER/PER計算）
-- **出力**: CSV形式の数値結果
-
-### 2. LoRa_CSMA_DC_PathLoss.jl
-- **目的**: 複雑なLoRaシミュレーションモデル（元版）
-- **特徴**:
-  - 動的SF選択
-  - シャドウイング考慮
-  - 詳細な分析機能
-  - 可視化機能
-- **用途**: より詳細な研究・分析用
-
-### 3. results_simple_model/
-- **目的**: シンプルモデルの結果保存
-- **内容**:
-  - 端末配置プロット
-  - SNRスイープ結果（CSV）
-  - 各種統計データ
 
 ## 元の複雑モデルとの違い
 
@@ -154,49 +112,6 @@ LoRa_Pathloss_CSMA_DC/
 | SNR計算 | 複雑 | シンプル |
 | 分析機能 | 詳細 | 基本 |
 
-## 使用方法の詳細
-
-### シンプルモデルの実行
-```bash
-cd LoRa_Pathloss_CSMA_DC
-julia LoRa_Simple_Model.jl
-```
-
-### 複雑モデルの実行
-```bash
-julia LoRa_CSMA_DC_PathLoss.jl
-```
-
-### 結果の確認
-```bash
-# CSV結果の確認
-cat results_simple_model/snr_sweep_ser_sf7_dev50.csv
-
-# プロットの確認
-open results_simple_model/simple_model_plot.png
-```
-
-## パラメータ調整
-
-### SNRスイープ範囲の変更
-```julia
-# LoRa_Simple_Model.jl の実行部分で変更
-snr_min, snr_max, snr_step = -20.0, 0.0, 0.5  # 現在の設定
-# snr_min, snr_max, snr_step = -15.0, 5.0, 1.0  # 例：変更後
-```
-
-### 端末数の変更
-```julia
-num_devices = 50  # 現在の設定
-# num_devices = 100  # 例：変更後
-```
-
-### 反復回数の変更
-```julia
-iter_sweep = 50  # 現在の設定
-# iter_sweep = 100  # 例：変更後（より正確な結果）
-```
-
 ## 今後の拡張可能性
 
 1. **SF適応**: 距離に基づくSF選択の追加
@@ -204,11 +119,9 @@ iter_sweep = 50  # 現在の設定
 3. **干渉モデル**: より詳細な干渉計算
 4. **移動性**: 端末の移動モデル
 5. **エネルギー消費**: バッテリー消費モデル
-6. **複数チャネル**: 複数周波数チャネルの考慮
 
 ## 注意事項
 
 - このモデルは教育・研究目的で作成されています
 - 実際のLoRaデバイスの動作とは異なる場合があります
 - パラメータは調整可能ですが、現実的な値の範囲内で設定してください
-- 結果の保存先パスは、必要に応じて変更可能です

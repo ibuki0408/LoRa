@@ -98,6 +98,15 @@ function calculate_snr(distance_km::Float64)
     return snr
 end
 
+# dBm/mW 変換
+@inline function dBm_to_mW(p_dBm::Float64)
+    return 10.0^((p_dBm) / 10.0)
+end
+
+@inline function mW_to_dBm(p_mW::Float64)
+    return p_mW > 0 ? 10.0 * log10(p_mW) : -Inf
+end
+
 # ===== ポアソン点過程による端末配置 =====
 function generate_poisson_positions(num_devices::Int, rng)
     # 円形エリア内にポアソン点過程で端末を配置
@@ -122,6 +131,7 @@ function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
     backoff_max::Float64=0.01,
     dc::Float64=0.01,
     fixed_snr::Union{Float64, Nothing}=nothing,  # 固定SNR値（Noneの場合は距離ベース）
+    cs_threshold_dBm::Union{Float64, Nothing}=nothing, # 受信電力しきい値（Noneで従来のbusy配列）
     rng=Random.default_rng())
 
     M  = 2^sf
@@ -156,6 +166,27 @@ function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
     # DC制約
     next_time = zeros(Float64, num_devices)
 
+    # 既にスケジュール済みのシンボルウィンドウ (start_sample, end_sample, tx_device)
+    scheduled_windows = Tuple{Int,Int,Int}[]
+
+    # 受信電力ベースのキャリアセンス関数（デバイスd視点）
+    sensed_power_at_device = function(d::Int, n0::Int, n1::Int)
+        if cs_threshold_dBm === nothing
+            return -Inf
+        end
+        total_mW = 0.0
+        xd, yd = node_positions[d]
+        for (s, e, tx) in scheduled_windows
+            if tx != d && !(e < n0 || s > n1)
+                xt, yt = node_positions[tx]
+                dist_km = distance(xd, yd, xt, yt)
+                p_dBm = received_power(Tx_dB, dist_km)
+                total_mW += dBm_to_mW(p_dBm)
+            end
+        end
+        return mW_to_dBm(total_mW)
+    end
+
     # 実際に送信
     tx_indices = [Int[] for _ in 1:num_devices]
     for d in sortperm(tx_starts)
@@ -173,7 +204,10 @@ function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
             n1 = n0 + M - 1
 
             # CSMA: busyなら待機＋バックオフ
-            while n1 <= total_samples && any(channel_busy[n0:n1])
+            while n1 <= total_samples && (
+                (cs_threshold_dBm === nothing && any(channel_busy[n0:n1])) ||
+                (cs_threshold_dBm !== nothing && sensed_power_at_device(d, n0, n1) >= cs_threshold_dBm)
+            )
                 t += rand(rng)*backoff_max
                 n0 = Int(floor(t*fs)) + 1
                 n1 = n0 + M - 1
@@ -194,6 +228,8 @@ function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
                 end
                 if s==1; first_start=n0; end
                 push!(tx_indices[d], n0)
+                # 他端末のキャリアセンス用にスケジュールを記録
+                push!(scheduled_windows, (n0, n1, d))
             end
             t += Ts
         end
@@ -443,50 +479,52 @@ println("  パスロス係数: α=$(α), β=$(β), γ=$(γ)")
 
 sf = SF
 bw = 125e3
-num_devices = 50
+num_devices = 100
 
-# 単一シミュレーション実行
-per, positions, snrs, errors = simple_csma_dc_per(sf, bw, num_devices;
+# 実行フラグ（SNRスイープ以外はデフォルトで無効化）
+RUN_SINGLE = false
+RUN_MULTIPLE = false
+RUN_SNR_SWEEP = true
+
+if RUN_SINGLE
+    per, positions, snrs, errors = simple_csma_dc_per(sf, bw, num_devices;
+                                       payload_range=(16,32),
+                                       sim_time=1.0,
+                                       backoff_max=0.01,
+                                       dc=0.01)
+
+    stats = analyze_simple_results(positions, snrs, errors)
+    println("\n=== シミュレーション結果 ===")
+    println("総端末数: $(stats[:total_devices])")
+    println("エラー数: $(stats[:total_errors])")
+    println("PER: $(stats[:per])")
+    println("平均距離: $(stats[:avg_distance]) km")
+    println("平均SNR: $(stats[:avg_snr]) dB")
+    println("SNR範囲: $(stats[:min_snr]) ~ $(stats[:max_snr]) dB")
+    plot_simple_results(positions, snrs, errors)
+end
+
+if RUN_MULTIPLE
+    println("\n=== 複数回実行による統計分析 ===")
+    per_results, all_stats = run_multiple_simulations(sf, bw, num_devices, 20;
+                                       payload_range=(16,32),
+                                       sim_time=1.0,
+                                       backoff_max=0.01,
+                                       dc=0.01)
+end
+
+if RUN_SNR_SWEEP
+    println("\n=== SNRスイープ実行（SER計算） ===")
+    snr_min, snr_max, snr_step = -20.0, 0.0, 0.5
+    iter_sweep = 1000  # スイープ用の反復回数
+    snrs, ser_vals, per_vals = run_snr_sweep_ser(sf, bw, num_devices,
+                                   snr_min, snr_max, snr_step;
                                    payload_range=(16,32),
                                    sim_time=1.0,
                                    backoff_max=0.01,
-                                   dc=0.01)
-
-# 結果分析
-stats = analyze_simple_results(positions, snrs, errors)
-
-println("\n=== シミュレーション結果 ===")
-println("総端末数: $(stats[:total_devices])")
-println("エラー数: $(stats[:total_errors])")
-println("PER: $(stats[:per])")
-println("平均距離: $(stats[:avg_distance]) km")
-println("平均SNR: $(stats[:avg_snr]) dB")
-println("SNR範囲: $(stats[:min_snr]) ~ $(stats[:max_snr]) dB")
-
-# 可視化
-plot_simple_results(positions, snrs, errors)
-
-# 複数回実行による統計分析
-println("\n=== 複数回実行による統計分析 ===")
-per_results, all_stats = run_multiple_simulations(sf, bw, num_devices, 20;
-                                   payload_range=(16,32),
-                                   sim_time=1.0,
-                                   backoff_max=0.01,
-                                   dc=0.01)
-
-# SNRスイープ実行（SER計算）
-println("\n=== SNRスイープ実行（SER計算） ===")
-snr_min, snr_max, snr_step = -20.0, 0.0, 0.5
-iter_sweep = 50  # スイープ用の反復回数
-
-snrs, ser_vals, per_vals = run_snr_sweep_ser(sf, bw, num_devices,
-                               snr_min, snr_max, snr_step;
-                               payload_range=(16,32),
-                               sim_time=1.0,
-                               backoff_max=0.01,
-                               dc=0.01,
-                               iter=iter_sweep,
-                               save_path="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_ser_sf$(sf)_dev$(num_devices).csv")
-
+                                   dc=0.01,
+                                   iter=iter_sweep,
+                                   save_path="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_ser_sf$(sf)_dev$(num_devices).csv")
+end
 
 println("\nシミュレーション完了！")

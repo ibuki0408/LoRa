@@ -498,6 +498,6 @@ snrs, per_vals, detailed_results = run_per_sweep_enhanced(sf, bw, num_devices,
                                backoff_max=0.01,
                                dc=0.01,
                                iter=iter,
-                               save_path="LoRa_SER/CSMA_DC/LoRa_PER_enhanced_sf$(sf)_dev$(num_devices).csv")
+                               save_path="LoRa_SER/LoRa_Pathloss_CSMA_DC/LoRa_PER_PathLoss_sf$(sf)_dev$(num_devices).csv")
 
 println("シミュレーション完了！")
