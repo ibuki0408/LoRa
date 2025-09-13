@@ -2,7 +2,7 @@ using Random, FFTW, Statistics, Printf, DelimitedFiles, LinearAlgebra, StatsBase
 
 # ===== パラメータ設定 =====
 # エリアサイズ(km)
-const area_size = 1.0
+const area_size = 0.5
 
 # パスロス係数
 const α = 4.0
@@ -555,8 +555,8 @@ function run_multiple_simulations(sf::Int, bw::Float64, num_devices::Int, num_ru
     return per_results, all_stats
 end
 
-# ===== SNRスイープ機能（SER計算） =====
-function run_snr_sweep_ser(sf::Int, bw::Float64, num_devices::Int,
+# ===== SNRスイープ機能（PER計算のみ） =====
+function run_snr_sweep_per(sf::Int, bw::Float64, num_devices::Int,
     snr_min::Float64, snr_max::Float64, snr_step::Float64;
     payload_range::Tuple{Int,Int}=(16,32),
     sim_time::Float64=1.0,
@@ -564,13 +564,12 @@ function run_snr_sweep_ser(sf::Int, bw::Float64, num_devices::Int,
     dc::Float64=0.01,
     iter::Int=100,
     seed::Int=1234,
-    save_path::String="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_ser.csv",
+    save_path::String="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_per.csv",
     cs_threshold_dBm::Union{Float64,Nothing}=nothing,   # 追加
     use_shadowing::Bool=true)                           # 追加
 
     rng = MersenneTwister(seed)
     snrs = collect(snr_min:snr_step:snr_max)
-    ser_vals = zeros(Float64, length(snrs))
     per_vals = zeros(Float64, length(snrs))
     
     println("SNRスイープ実行中...")
@@ -578,7 +577,6 @@ function run_snr_sweep_ser(sf::Int, bw::Float64, num_devices::Int,
     println("反復回数: $iter")
     
     for (i, snr) in enumerate(snrs)
-        acc_ser = 0.0
         acc_per = 0.0
         
         for it in 1:iter
@@ -596,34 +594,12 @@ function run_snr_sweep_ser(sf::Int, bw::Float64, num_devices::Int,
                                                use_shadowing=use_shadowing,         # 追加
                                                rng=local_rng)
             
-            # SER計算（シンボルエラー率）
-            # 各端末のシンボルエラー数を計算
-            total_symbols = 0
-            error_symbols = 0
-            
-            for d in 1:num_devices
-                if !isempty(positions)  # 端末が存在する場合
-                    # ペイロード長を取得（簡易版）
-                    payload_len = rand(local_rng, payload_range[1]:payload_range[2])
-                    total_symbols += payload_len
-                    
-                    # エラー確率に基づいてシンボルエラーを計算
-                    if errors[d]
-                        # エラーがある場合、ランダムにシンボルエラーを発生
-                        error_symbols += rand(local_rng, 1:payload_len)
-                    end
-                end
-            end
-            
-            ser = total_symbols > 0 ? error_symbols / total_symbols : 0.0
-            acc_ser += ser
             acc_per += per
         end
         
-        ser_vals[i] = acc_ser / iter
         per_vals[i] = acc_per / iter
         
-        @printf("SNR = %5.1f dB, SER = %.6f, PER = %.6f\n", snr, ser_vals[i], per_vals[i])
+        @printf("SNR = %5.1f dB, PER = %.6f\n", snr, per_vals[i])
     end
 
     # CSV保存
@@ -632,17 +608,18 @@ function run_snr_sweep_ser(sf::Int, bw::Float64, num_devices::Int,
     end
     
     open(save_path, "w") do io
-        println(io, "SNR_dB,SER,PER")
+        println(io, "SNR_dB,PER")
         for i in 1:length(snrs)
-            println(io, "$(snrs[i]),$(ser_vals[i]),$(per_vals[i])")
+            println(io, "$(snrs[i]),$(per_vals[i])")
         end
     end
     
     @info "SNRスイープ結果をCSVに保存しました: $save_path"
     
-    return snrs, ser_vals, per_vals
+    return snrs, per_vals
 end
 
+# 理論的なSER計算関数を削除（不要になったため）
 
 # ===== 実行部分 =====
 println("LoRa シンプルモデル シミュレーション開始")
@@ -656,12 +633,12 @@ println("  シャドウイング標準偏差: $(shadowing_std) dB")
 
 sf = SF
 bw = 125e3
-num_devices = 200
+num_devices = 2
 
 # 実行フラグ（SNRスイープ以外はデフォルトで無効化）
 RUN_SINGLE = false  # 可視化のため有効化
 RUN_MULTIPLE = false
-RUN_SNR_SWEEP = true  # 一時的に無効化
+RUN_SNR_SWEEP = true  # PER計算のみに変更
 RUN_VISUALIZATION_ONLY = false  # 可視化のみ実行
 
 if RUN_VISUALIZATION_ONLY
@@ -701,10 +678,10 @@ if RUN_MULTIPLE
 end
 
 if RUN_SNR_SWEEP
-    println("\n=== SNRスイープ実行（SER計算） ===")
+    println("\n=== SNRスイープ実行（PER計算のみ） ===")
     snr_min, snr_max, snr_step = -20.0, 0.0, 0.5
-    iter_sweep = 10000  # スイープ用の反復回数
-    snrs, ser_vals, per_vals = run_snr_sweep_ser(sf, bw, num_devices,
+    iter_sweep = 1000 # スイープ用の反復回数
+    snrs, per_vals = run_snr_sweep_per(sf, bw, num_devices,
                                    snr_min, snr_max, snr_step;
                                    payload_range=(16,32),
                                    sim_time=1.0,
@@ -713,7 +690,7 @@ if RUN_SNR_SWEEP
                                    iter=iter_sweep,
                                    cs_threshold_dBm=-110.0,
                                    use_shadowing=true,
-                                   save_path="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_ser_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
+                                   save_path="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
 end
 
 println("\nシミュレーション完了！")

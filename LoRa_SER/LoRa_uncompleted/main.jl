@@ -114,4 +114,4 @@ function main(sf::Int64,bw::Int64,resolution::Float64,iter::Int64)
     # println("Press Enter to exit this program (or function)")
     # readline(stdin)
 end
-@elapsed main(9,125*10^3,0.5,10^4)
+@elapsed main(9,125*10^3,0.5,10^3)
