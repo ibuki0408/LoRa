@@ -2,7 +2,7 @@ using Random, FFTW, Statistics, Printf, DelimitedFiles, LinearAlgebra, StatsBase
 
 # ===== パラメータ設定 =====
 # エリアサイズ(km)
-const area_size = 0.5
+const area_size = 1.0
 
 # パスロス係数
 const α = 4.0
@@ -478,9 +478,9 @@ println("  パスロス係数: α=$(α), β=$(β), γ=$(γ)")
 
 sf = 7
 bw = 125e3
-num_devices = 50
+num_devices = 150
 snr_min, snr_max, snr_step = -10.0, 0.0, 1.0
-iter = 50   # 反復回数
+iter = 1000   # 反復回数
 
 per, positions, sfs, shadowing, errors = csma_dc_per_enhanced(sf, bw, num_devices;
                                    payload_range=(16,32),

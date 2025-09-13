@@ -2,7 +2,7 @@ using Random, FFTW, Statistics, Printf, DelimitedFiles, LinearAlgebra, StatsBase
 
 # ===== パラメータ設定 =====
 # エリアサイズ(km)
-const area_size = 0.5
+const area_size = 1.0
 
 # パスロス係数
 const α = 4.0
@@ -15,6 +15,9 @@ const γ = 4.5
 
 # 搬送波周波数(MHz)
 const f_c = 923.2
+
+# シャドウイング標準偏差[dB] - 追加
+const shadowing_std = 3.48
 
 # 送信電力(dBm)
 const Tx_dB = 13.0
@@ -85,14 +88,37 @@ function path_loss(distance_km::Float64)
     return 10 * α * log10(distance_km) + β + 10 * γ * log10(f_c)
 end
 
+# シャドウイング値生成関数 - 追加
+function shadowing_value(rng)
+    # シャドウイング値生成（ログ正規分布）
+    return randn(rng) * shadowing_std
+end
+
+# 受信電力計算関数を修正（シャドウイング追加）
+function received_power(tx_power_dBm::Float64, distance_km::Float64, shadowing_dB::Float64)
+    # 受信電力計算: Pr = Pt - PL - Shadowing
+    pl = path_loss(distance_km)
+    return tx_power_dBm - pl - shadowing_dB
+end
+
+# 既存の関数も保持（後方互換性のため）
 function received_power(tx_power_dBm::Float64, distance_km::Float64)
-    # 受信電力計算: Pr = Pt - PL
+    # シャドウイングなしの受信電力計算
     pl = path_loss(distance_km)
     return tx_power_dBm - pl
 end
 
+# SNR計算関数を修正（シャドウイング対応）
+function calculate_snr(distance_km::Float64, shadowing_dB::Float64)
+    # SNR計算（シャドウイング考慮）
+    received_pwr = received_power(Tx_dB, distance_km, shadowing_dB)
+    snr = received_pwr - (noise_power_spectrum_density + 10*log10(band_width) + noise_figure)
+    return snr
+end
+
+# 既存の関数も保持
 function calculate_snr(distance_km::Float64)
-    # SNR計算
+    # シャドウイングなしのSNR計算
     received_pwr = received_power(Tx_dB, distance_km)
     snr = received_pwr - (noise_power_spectrum_density + 10*log10(band_width) + noise_figure)
     return snr
@@ -124,7 +150,7 @@ function generate_poisson_positions(num_devices::Int, rng)
     return positions
 end
 
-# ===== シンプルなCSMA + DC + PER =====
+# ===== 改良版CSMA + DC + PER（シャドウイング対応） =====
 function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
     payload_range::Tuple{Int,Int}=(16,32),
     sim_time::Float64=1.0,
@@ -132,6 +158,7 @@ function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
     dc::Float64=0.01,
     fixed_snr::Union{Float64, Nothing}=nothing,  # 固定SNR値（Noneの場合は距離ベース）
     cs_threshold_dBm::Union{Float64, Nothing}=nothing, # 受信電力しきい値（Noneで従来のbusy配列）
+    use_shadowing::Bool=true,  # シャドウイング使用フラグ - 追加
     rng=Random.default_rng())
 
     M  = 2^sf
@@ -141,11 +168,18 @@ function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
     # ポアソン点過程で端末配置生成
     node_positions = generate_poisson_positions(num_devices, rng)
     
+    # シャドウイング値生成 - 追加
+    shadowing_values = use_shadowing ? [shadowing_value(rng) for _ in 1:num_devices] : zeros(num_devices)
+    
     # 各端末のSNR計算（固定SNRまたは距離ベース）
     if fixed_snr !== nothing
         device_snrs = fill(fixed_snr, num_devices)
     else
-        device_snrs = [calculate_snr(distance(pos[1], pos[2], 0.0, 0.0)) for pos in node_positions]
+        if use_shadowing
+            device_snrs = [calculate_snr(distance(pos[1], pos[2], 0.0, 0.0), shadowing_values[i]) for (i, pos) in enumerate(node_positions)]
+        else
+            device_snrs = [calculate_snr(distance(pos[1], pos[2], 0.0, 0.0)) for pos in node_positions]
+        end
     end
     
     # 送信スケジュール
@@ -180,7 +214,11 @@ function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
             if tx != d && !(e < n0 || s > n1)
                 xt, yt = node_positions[tx]
                 dist_km = distance(xd, yd, xt, yt)
-                p_dBm = received_power(Tx_dB, dist_km)
+                if use_shadowing
+                    p_dBm = received_power(Tx_dB, dist_km, shadowing_values[tx])
+                else
+                    p_dBm = received_power(Tx_dB, dist_km)
+                end
                 total_mW += dBm_to_mW(p_dBm)
             end
         end
@@ -277,11 +315,12 @@ function simple_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
         end
     end
 
-    return mean(Float64.(errors)), node_positions, device_snrs, errors
+    # シャドウイング値を返り値に追加
+    return mean(Float64.(errors)), node_positions, device_snrs, errors, shadowing_values
 end
 
 # ===== 結果分析関数 =====
-function analyze_simple_results(node_positions, device_snrs, errors)
+function analyze_simple_results(node_positions, device_snrs, errors, shadowing_values=nothing)
     num_devices = length(node_positions)
     
     # 距離別分析
@@ -300,12 +339,64 @@ function analyze_simple_results(node_positions, device_snrs, errors)
         :max_snr => maximum(device_snrs)
     )
     
+    # シャドウイング統計を追加
+    if shadowing_values !== nothing
+        stats[:avg_shadowing] = mean(shadowing_values)
+        stats[:min_shadowing] = minimum(shadowing_values)
+        stats[:max_shadowing] = maximum(shadowing_values)
+        stats[:shadowing_std] = std(shadowing_values)
+    end
+    
     return stats
 end
 
 # ===== 可視化関数 =====
 
-function plot_simple_results(node_positions, device_snrs, errors)
+# シンプルな端末配置可視化関数
+function plot_node_positions(node_positions; 
+    sf::Int=7, num_devices::Int=100, save_prefix::String="node_positions")
+    xs = [pos[1] for pos in node_positions]
+    ys = [pos[2] for pos in node_positions]
+    
+    p = scatter(xs, ys,
+        color = :blue,
+        xlabel = "X [km]", ylabel = "Y [km]",
+        title = "LoRa Node Distribution\nSF=$(sf), Devices=$(num_devices)",
+        legend = false,
+        markersize = 4,
+        aspect_ratio = :equal,
+        alpha = 0.7)
+    
+    # ゲートウェイを緑の星印でプロット
+    scatter!(p, [0.0], [0.0], markershape = :star5, color = :green, label = "Gateway", markersize = 12)
+    
+    # エリア境界を円で表示
+    theta = 0:0.01:2π
+    circle_x = area_size .* cos.(theta)
+    circle_y = area_size .* sin.(theta)
+    plot!(p, circle_x, circle_y, color = :black, linestyle = :dash, linewidth = 2, label = "Area Boundary")
+    
+    # プロット情報を表示
+    println("端末配置プロットを生成中...")
+    println("総端末数: $(length(node_positions))")
+    
+    # プロットを表示
+    display(p)
+    
+    # プロットをファイルに保存
+    save_path = "LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
+    if !isdir(dirname(save_path))
+        mkpath(dirname(save_path))
+    end
+    savefig(p, save_path)
+    println("プロットを保存しました: $save_path")
+    
+    return p
+end
+
+# エラー状態の可視化関数
+function plot_node_positions_with_errors(node_positions, device_snrs, errors; 
+    sf::Int=7, num_devices::Int=100, save_prefix::String="node_positions_errors")
     xs = [pos[1] for pos in node_positions]
     ys = [pos[2] for pos in node_positions]
     
@@ -315,23 +406,31 @@ function plot_simple_results(node_positions, device_snrs, errors)
     p = scatter(xs, ys,
         color = colors,
         xlabel = "X [km]", ylabel = "Y [km]",
-        title = "LoRa Node Distribution (Simple Model)\nRed: Error, Blue: Success",
+        title = "LoRa Node Distribution (Error Status)\nRed: Error, Blue: Success",
         legend = false,
-        markersize = 6)
+        markersize = 6,
+        aspect_ratio = :equal)
     
     # ゲートウェイを緑の星印でプロット
-    scatter!(p, [0.0], [0.0], markershape = :star5, color = :green, label = "Gateway", markersize = 10)
+    scatter!(p, [0.0], [0.0], markershape = :star5, color = :green, label = "Gateway", markersize = 12)
+    
+    # エリア境界を円で表示
+    theta = 0:0.01:2π
+    circle_x = area_size .* cos.(theta)
+    circle_y = area_size .* sin.(theta)
+    plot!(p, circle_x, circle_y, color = :black, linestyle = :dash, linewidth = 2, label = "Area Boundary")
     
     # プロット情報を表示
-    println("端末配置プロットを生成中...")
+    println("エラー状態プロットを生成中...")
     println("総端末数: $(length(node_positions))")
     println("エラー端末数: $(sum(errors))")
+    println("成功率: $(1.0 - mean(Float64.(errors)))")
     
     # プロットを表示
     display(p)
     
     # プロットをファイルに保存
-    save_path = "LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/simple_model_plot.png"  # 相対パスに変更
+    save_path = "LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
     if !isdir(dirname(save_path))
         mkpath(dirname(save_path))
     end
@@ -339,6 +438,79 @@ function plot_simple_results(node_positions, device_snrs, errors)
     println("プロットを保存しました: $save_path")
     
     return p
+end
+
+# SNR分布の可視化
+function plot_snr_distribution(node_positions, device_snrs; 
+    sf::Int=7, num_devices::Int=100, save_prefix::String="snr_distribution")
+    xs = [pos[1] for pos in node_positions]
+    ys = [pos[2] for pos in node_positions]
+    
+    p = scatter(xs, ys,
+        zcolor = device_snrs,  # zcolorを使用
+        xlabel = "X [km]", ylabel = "Y [km]",
+        title = "LoRa Node SNR Distribution\nSF=$(sf), Devices=$(num_devices)",
+        legend = false,
+        markersize = 6,
+        aspect_ratio = :equal,
+        colorbar_title = "SNR [dB]",
+        colorbar_titlefontsize = 10)
+    
+    # ゲートウェイを緑の星印でプロット
+    scatter!(p, [0.0], [0.0], markershape = :star5, color = :green, label = "Gateway", markersize = 12)
+    
+    # エリア境界を円で表示
+    theta = 0:0.01:2π
+    circle_x = area_size .* cos.(theta)
+    circle_y = area_size .* sin.(theta)
+    plot!(p, circle_x, circle_y, color = :black, linestyle = :dash, linewidth = 2, label = "Area Boundary")
+    
+    # プロット情報を表示
+    println("SNR分布プロットを生成中...")
+    println("総端末数: $(length(node_positions))")
+    println("平均SNR: $(mean(device_snrs)) dB")
+    println("SNR範囲: $(minimum(device_snrs)) ~ $(maximum(device_snrs)) dB")
+    
+    # プロットを表示
+    display(p)
+    
+    # プロットをファイルに保存
+    save_path = "LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
+    if !isdir(dirname(save_path))
+        mkpath(dirname(save_path))
+    end
+    savefig(p, save_path)
+    println("プロットを保存しました: $save_path")
+    
+    return p
+end
+
+# 統合可視化関数
+function visualize_simulation_results(node_positions, device_snrs, errors; 
+    sf::Int=7, num_devices::Int=100, save_prefix::String="simulation_results")
+    
+    println("\n=== シミュレーション結果可視化 ===")
+    
+    # 1. 基本的な端末配置
+    p1 = plot_node_positions(node_positions; sf=sf, num_devices=num_devices, save_prefix=save_prefix)
+    
+    # 2. SNR分布
+    p3 = plot_snr_distribution(node_positions, device_snrs; sf=sf, num_devices=num_devices, save_prefix=save_prefix)
+    
+    # 3. エラー状態
+    p4 = plot_node_positions_with_errors(node_positions, device_snrs, errors; sf=sf, num_devices=num_devices, save_prefix=save_prefix)
+    
+    # 4. 統計情報の表示
+    distances = [distance(pos[1], pos[2], 0.0, 0.0) for pos in node_positions]
+    println("\n=== 統計情報 ===")
+    println("総端末数: $(length(node_positions))")
+    println("エラー端末数: $(sum(errors))")
+    println("成功率: $(1.0 - mean(Float64.(errors)))")
+    println("平均距離: $(mean(distances)) km")
+    println("平均SNR: $(mean(device_snrs)) dB")
+    println("SNR範囲: $(minimum(device_snrs)) ~ $(maximum(device_snrs)) dB")
+    
+    return p1, p3, p4
 end
 
 # ===== 複数回実行による統計分析 =====
@@ -392,7 +564,9 @@ function run_snr_sweep_ser(sf::Int, bw::Float64, num_devices::Int,
     dc::Float64=0.01,
     iter::Int=100,
     seed::Int=1234,
-    save_path::String="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_ser.csv")
+    save_path::String="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_ser.csv",
+    cs_threshold_dBm::Union{Float64,Nothing}=nothing,   # 追加
+    use_shadowing::Bool=true)                           # 追加
 
     rng = MersenneTwister(seed)
     snrs = collect(snr_min:snr_step:snr_max)
@@ -418,6 +592,8 @@ function run_snr_sweep_ser(sf::Int, bw::Float64, num_devices::Int,
                                                backoff_max=backoff_max,
                                                dc=dc,
                                                fixed_snr=snr,
+                                               cs_threshold_dBm=cs_threshold_dBm,   # 追加
+                                               use_shadowing=use_shadowing,         # 追加
                                                rng=local_rng)
             
             # SER計算（シンボルエラー率）
@@ -476,15 +652,24 @@ println("  エリアサイズ: $(area_size) km")
 println("  送信電力: $(Tx_dB) dBm")
 println("  搬送波周波数: $(f_c) MHz")
 println("  パスロス係数: α=$(α), β=$(β), γ=$(γ)")
+println("  シャドウイング標準偏差: $(shadowing_std) dB")
 
 sf = SF
 bw = 125e3
-num_devices = 100
+num_devices = 200
 
 # 実行フラグ（SNRスイープ以外はデフォルトで無効化）
-RUN_SINGLE = false
+RUN_SINGLE = false  # 可視化のため有効化
 RUN_MULTIPLE = false
-RUN_SNR_SWEEP = true
+RUN_SNR_SWEEP = true  # 一時的に無効化
+RUN_VISUALIZATION_ONLY = false  # 可視化のみ実行
+
+if RUN_VISUALIZATION_ONLY
+    # 可視化のみ実行（テスト用）
+    println("\n=== 可視化テスト実行 ===")
+    test_positions = generate_poisson_positions(num_devices, Random.default_rng())
+    plot_node_positions(test_positions; sf=sf, num_devices=num_devices, save_prefix="nodes_only_test")
+end
 
 if RUN_SINGLE
     per, positions, snrs, errors = simple_csma_dc_per(sf, bw, num_devices;
@@ -501,7 +686,9 @@ if RUN_SINGLE
     println("平均距離: $(stats[:avg_distance]) km")
     println("平均SNR: $(stats[:avg_snr]) dB")
     println("SNR範囲: $(stats[:min_snr]) ~ $(stats[:max_snr]) dB")
-    plot_simple_results(positions, snrs, errors)
+    
+    # 統合可視化実行 → 端末配置のみ
+    plot_node_positions(positions; sf=sf, num_devices=num_devices, save_prefix="nodes_only")
 end
 
 if RUN_MULTIPLE
@@ -516,7 +703,7 @@ end
 if RUN_SNR_SWEEP
     println("\n=== SNRスイープ実行（SER計算） ===")
     snr_min, snr_max, snr_step = -20.0, 0.0, 0.5
-    iter_sweep = 1000  # スイープ用の反復回数
+    iter_sweep = 10000  # スイープ用の反復回数
     snrs, ser_vals, per_vals = run_snr_sweep_ser(sf, bw, num_devices,
                                    snr_min, snr_max, snr_step;
                                    payload_range=(16,32),
@@ -524,7 +711,9 @@ if RUN_SNR_SWEEP
                                    backoff_max=0.01,
                                    dc=0.01,
                                    iter=iter_sweep,
-                                   save_path="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_ser_sf$(sf)_dev$(num_devices).csv")
+                                   cs_threshold_dBm=-110.0,
+                                   use_shadowing=true,
+                                   save_path="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_ser_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
 end
 
 println("\nシミュレーション完了！")
