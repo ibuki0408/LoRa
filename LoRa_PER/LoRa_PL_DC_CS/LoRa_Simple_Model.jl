@@ -116,14 +116,6 @@ function calculate_snr(distance_km::Float64, shadowing_dB::Float64)
     return snr
 end
 
-# 既存の関数も保持
-function calculate_snr(distance_km::Float64)
-    # シャドウイングなしのSNR計算
-    received_pwr = received_power(Tx_dB, distance_km)
-    snr = received_pwr - (noise_power_spectrum_density + 10*log10(band_width) + noise_figure)
-    return snr
-end
-
 # dBm/mW 変換
 @inline function dBm_to_mW(p_dBm::Float64)
     return 10.0^((p_dBm) / 10.0)
@@ -384,7 +376,7 @@ function plot_node_positions(node_positions;
     display(p)
     
     # プロットをファイルに保存
-    save_path = "LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
+    save_path = "results_LoRa_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
     if !isdir(dirname(save_path))
         mkpath(dirname(save_path))
     end
@@ -430,7 +422,7 @@ function plot_node_positions_with_errors(node_positions, device_snrs, errors;
     display(p)
     
     # プロットをファイルに保存
-    save_path = "LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
+    save_path = "results_LoRa_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
     if !isdir(dirname(save_path))
         mkpath(dirname(save_path))
     end
@@ -475,7 +467,7 @@ function plot_snr_distribution(node_positions, device_snrs;
     display(p)
     
     # プロットをファイルに保存
-    save_path = "LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
+    save_path = "results_LoRa_simple_model/$(save_prefix)_sf$(sf)_dev$(num_devices).png"
     if !isdir(dirname(save_path))
         mkpath(dirname(save_path))
     end
@@ -564,7 +556,7 @@ function run_snr_sweep_per(sf::Int, bw::Float64, num_devices::Int,
     dc::Float64=0.01,
     iter::Int=100,
     seed::Int=1234,
-    save_path::String="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_per.csv",
+    save_path::String="LoRa_PER/LoRa_PL_DC_CS/results_LoRa_simple_model/snr_sweep_per.csv",
     cs_threshold_dBm::Union{Float64,Nothing}=nothing,   # 追加
     use_shadowing::Bool=true)                           # 追加
 
@@ -621,6 +613,393 @@ end
 
 # 理論的なSER計算関数を削除（不要になったため）
 
+# ===== 継続的送信版CSMA + DC + PER（シャドウイング対応） =====
+function continuous_csma_dc_per(sf::Int, bw::Float64, num_devices::Int;
+    payload_range::Tuple{Int,Int}=(16,32),
+    sim_time::Float64=10.0,  # より長いシミュレーション時間
+    backoff_max::Float64=0.01,
+    dc::Float64=0.01,
+    packet_interval::Float64=2.0,  # パケット送信間隔（秒）
+    fixed_snr::Union{Float64, Nothing}=nothing,
+    cs_threshold_dBm::Union{Float64, Nothing}=nothing,
+    use_shadowing::Bool=true,
+    rng=Random.default_rng())
+
+    M  = 2^sf
+    Ts = M / bw     # シンボル長
+    fs = bw         # サンプル周波数 ≈ 帯域幅
+
+    # ポアソン点過程で端末配置生成
+    node_positions = generate_poisson_positions(num_devices, rng)
+    
+    # シャドウイング値生成
+    shadowing_values = use_shadowing ? [shadowing_value(rng) for _ in 1:num_devices] : zeros(num_devices)
+    
+    # 各端末のSNR計算（固定SNRまたは距離ベース）
+    if fixed_snr !== nothing
+        # 固定SNRの場合はシャドウイングを無効化して正確なSNRを保証
+        device_snrs = fill(fixed_snr, num_devices)
+        # シャドウイング値は0に設定（使用しない）
+        shadowing_values = zeros(num_devices)
+    else
+        if use_shadowing
+            device_snrs = [calculate_snr(distance(pos[1], pos[2], 0.0, 0.0), shadowing_values[i]) for (i, pos) in enumerate(node_positions)]
+        else
+            device_snrs = [calculate_snr(distance(pos[1], pos[2], 0.0, 0.0)) for pos in node_positions]
+        end
+    end
+    
+    # 継続的送信用のデータ構造
+    device_next_tx_time = rand(rng, num_devices) .* packet_interval  # 各端末の次の送信時刻
+    device_packet_count = zeros(Int, num_devices)  # 各端末の送信パケット数
+    device_success_count = zeros(Int, num_devices)  # 各端末の成功パケット数
+    
+    # 送信シンボル記録用のデータ構造
+    device_payloads = Vector{Vector{Int}}[]  # 各端末の送信パケットのシンボル
+    device_packet_starts = Vector{Int}[]  # 各端末のパケット開始サンプル
+    for d in 1:num_devices
+        push!(device_payloads, Vector{Int}[])
+        push!(device_packet_starts, Int[])
+    end
+    
+    # 受信バッファ（より大きなサイズ）
+    total_samples = Int(ceil(sim_time * fs * 2))  # 余裕を持ったサイズ
+    rx_signal = zeros(ComplexF64, total_samples)
+    channel_busy = falses(total_samples)
+    
+    # シンボルキャッシュ
+    sym_cache = Dict{Int, Vector{ComplexF64}}()
+    
+    # 送信スケジュール記録
+    scheduled_windows = Tuple{Int,Int,Int}[]  # (start_sample, end_sample, tx_device)
+    
+    # 受信電力ベースのキャリアセンス関数
+    sensed_power_at_device = function(d::Int, n0::Int, n1::Int)
+        if cs_threshold_dBm === nothing
+            return -Inf
+        end
+        total_mW = 0.0
+        xd, yd = node_positions[d]
+        for (s, e, tx) in scheduled_windows
+            if tx != d && !(e < n0 || s > n1)
+                xt, yt = node_positions[tx]
+                dist_km = distance(xd, yd, xt, yt)
+                if use_shadowing
+                    p_dBm = received_power(Tx_dB, dist_km, shadowing_values[tx])
+                else
+                    p_dBm = received_power(Tx_dB, dist_km)
+                end
+                total_mW += dBm_to_mW(p_dBm)
+            end
+        end
+        return mW_to_dBm(total_mW)
+    end
+    
+    # 継続的送信シミュレーション
+    current_time = 0.0
+    time_step = 0.001  # 1ms刻みで時間を進める
+    
+    while current_time < sim_time
+        # 送信可能な端末をチェック
+        for d in 1:num_devices
+            if device_next_tx_time[d] <= current_time
+                # パケット送信を試行
+                payload_len = rand(rng, payload_range[1]:payload_range[2])
+                payload = [rand(rng, 0:M-1) for _ in 1:payload_len]
+                
+                # 送信開始時刻
+                tx_start_time = current_time
+                tx_success = true
+                first_start_sample = 0
+                
+                # パケット内の各シンボルを送信
+                for s in 1:payload_len
+                    m = payload[s]
+                    if !haskey(sym_cache, m)
+                        sym_cache[m] = lora_symbol(sf, bw, m)
+                    end
+                    wave = sym_cache[m]
+                    
+                    n0 = Int(floor(tx_start_time * fs)) + 1
+                    n1 = n0 + M - 1
+                    
+                    # 境界チェック
+                    if n1 > total_samples
+                        tx_success = false
+                        break
+                    end
+                    
+                    # CSMA: busyなら待機＋バックオフ
+                    backoff_count = 0
+                    max_backoffs = 10  # 最大バックオフ回数
+                    
+                    while backoff_count < max_backoffs && (
+                        (cs_threshold_dBm === nothing && any(channel_busy[n0:n1])) ||
+                        (cs_threshold_dBm !== nothing && sensed_power_at_device(d, n0, n1) >= cs_threshold_dBm)
+                    )
+                        backoff_time = rand(rng) * backoff_max
+                        tx_start_time += backoff_time
+                        n0 = Int(floor(tx_start_time * fs)) + 1
+                        n1 = n0 + M - 1
+                        backoff_count += 1
+                        
+                        # 境界チェック
+                        if n1 > total_samples
+                            tx_success = false
+                            break
+                        end
+                    end
+                    
+                    if !tx_success || backoff_count >= max_backoffs
+                        tx_success = false
+                        break
+                    end
+                    
+                    # 送信実行
+                    if n0 >= 1 && n1 <= total_samples
+                        # チャネル占有
+                        channel_busy[n0:n1] .= true
+                        
+                        # 信号送信
+                        for i in 1:M
+                            idx = n0 + i - 1
+                            if idx >= 1 && idx <= length(rx_signal) && i <= length(wave)
+                                rx_signal[idx] += wave[i]
+                            end
+                        end
+                        
+                        if s == 1
+                            first_start_sample = n0
+                            # 送信シンボルとパケット開始サンプルを記録
+                            push!(device_payloads[d], copy(payload))
+                            push!(device_packet_starts[d], n0)
+                        end
+                        
+                        # 送信スケジュール記録
+                        push!(scheduled_windows, (n0, n1, d))
+                    end
+                    
+                    tx_start_time += Ts
+                end
+                
+                # パケット送信完了
+                device_packet_count[d] += 1
+                
+                if tx_success
+                    device_success_count[d] += 1
+                    
+                    # DC制約の計算
+                    if dc > 0
+                        T_on = payload_len * Ts
+                        T_off = T_on * (1 - dc) / dc
+                        device_next_tx_time[d] = current_time + T_on + T_off
+                    else
+                        device_next_tx_time[d] = current_time + packet_interval
+                    end
+                else
+                    # 送信失敗時は短い間隔で再試行
+                    device_next_tx_time[d] = current_time + packet_interval * 0.1
+                end
+            end
+        end
+        
+        current_time += time_step
+    end
+    
+    # 各端末のSNRに基づくAWGN付加
+    for d in 1:num_devices
+        if device_packet_count[d] > 0
+            snr = device_snrs[d]
+            # 送信された信号にAWGNを付加
+            for (start_idx, end_idx, tx_device) in scheduled_windows
+                if tx_device == d
+                    if start_idx >= 1 && end_idx <= length(rx_signal)
+                        signal_segment = @view rx_signal[start_idx:end_idx]
+                        add_awgn!(signal_segment, snr)
+                    end
+                end
+            end
+        end
+    end
+    
+    # 復調＋PER判定
+    errors = falses(num_devices)
+    device_packet_errors = zeros(Int, num_devices)  # 各端末のエラーパケット数
+    
+    for d in 1:num_devices
+        if device_packet_count[d] > 0
+            # 各端末の送信パケットを復調
+            num_payloads = length(device_payloads[d])
+            num_starts = length(device_packet_starts[d])
+            num_packets = min(num_payloads, num_starts)
+            
+            for packet_idx in 1:num_packets
+                payload = device_payloads[d][packet_idx]
+                packet_start = device_packet_starts[d][packet_idx]
+                packet_has_error = false
+                
+                # パケット内の各シンボルを復調
+                for s in 1:length(payload)
+                    start_idx = packet_start + (s-1) * M
+                    end_idx = start_idx + M - 1
+                    
+                    if end_idx <= total_samples && start_idx >= 1 && end_idx <= length(rx_signal)
+                        y = @view rx_signal[start_idx:end_idx]
+                        m_hat = demod_lora(sf, bw, y)
+                        
+                        # 送信シンボルと復調結果を比較
+                        if m_hat != payload[s]
+                            packet_has_error = true
+                            break
+                        end
+                    else
+                        packet_has_error = true
+                        break
+                    end
+                end
+                
+                if packet_has_error
+                    device_packet_errors[d] += 1
+                end
+            end
+            
+            # 端末全体でエラーがあるかチェック
+            if device_packet_errors[d] > 0
+                errors[d] = true
+            end
+        end
+    end
+    
+    # 統計計算
+    total_packets = sum(device_packet_count)
+    total_errors = sum(device_packet_errors)
+    per = total_packets > 0 ? total_errors / total_packets : 0.0
+    
+    return per, node_positions, device_snrs, errors, shadowing_values, device_packet_count, device_success_count
+end
+
+# ===== 継続的送信版SNRスイープ機能 =====
+function run_continuous_snr_sweep_per(sf::Int, bw::Float64, num_devices::Int,
+    snr_min::Float64, snr_max::Float64, snr_step::Float64;
+    payload_range::Tuple{Int,Int}=(16,32),
+    sim_time::Float64=10.0,  # 継続的送信用の長いシミュレーション時間
+    backoff_max::Float64=0.01,
+    dc::Float64=0.01,
+    packet_interval::Float64=2.0,  # パケット送信間隔
+    iter::Int=100,
+    seed::Int=1234,
+    save_path::String="LoRa_PER/LoRa_PL_DC_CS/results_LoRa_simple_model/continuous_snr_sweep_per.csv",
+    cs_threshold_dBm::Union{Float64,Nothing}=nothing,
+    use_shadowing::Bool=true)
+
+    rng = MersenneTwister(seed)
+    snrs = collect(snr_min:snr_step:snr_max)
+    per_vals = zeros(Float64, length(snrs))
+    
+    println("継続的送信SNRスイープ実行中...")
+    println("SNR範囲: $(snr_min) ~ $(snr_max) dB, ステップ: $(snr_step) dB")
+    println("反復回数: $iter")
+    println("シミュレーション時間: $sim_time 秒")
+    println("パケット送信間隔: $packet_interval 秒")
+    
+    for (i, snr) in enumerate(snrs)
+        acc_per = 0.0
+        
+        for it in 1:iter
+            # 各反復で独立したRNGを使用
+            local_rng = MersenneTwister(seed + it + i * 1000)
+            
+            # 固定SNRで継続的送信シミュレーション実行
+            per, positions, snrs_actual, errors, shadowing_vals, packet_counts, success_counts = continuous_csma_dc_per(sf, bw, num_devices;
+                                               payload_range=payload_range,
+                                               sim_time=sim_time,
+                                               backoff_max=backoff_max,
+                                               dc=dc,
+                                               packet_interval=packet_interval,
+                                               fixed_snr=snr,
+                                               cs_threshold_dBm=cs_threshold_dBm,
+                                               use_shadowing=use_shadowing,
+                                               rng=local_rng)
+            
+            acc_per += per
+        end
+        
+        per_vals[i] = acc_per / iter
+        
+        @printf("SNR = %5.1f dB, PER = %.6f\n", snr, per_vals[i])
+    end
+
+    # CSV保存
+    if !isdir(dirname(save_path))
+        mkpath(dirname(save_path))
+    end
+    
+    open(save_path, "w") do io
+        println(io, "SNR_dB,PER")
+        for i in 1:length(snrs)
+            println(io, "$(snrs[i]),$(per_vals[i])")
+        end
+    end
+    
+    @info "継続的送信SNRスイープ結果をCSVに保存しました: $save_path"
+    
+    return snrs, per_vals
+end
+
+# ===== 継続的送信版の実行部分 =====
+function run_continuous_simulation(sf::Int, bw::Float64, num_devices::Int;
+    sim_time::Float64=10.0,
+    packet_interval::Float64=2.0,
+    payload_range::Tuple{Int,Int}=(16,32),
+    backoff_max::Float64=0.01,
+    dc::Float64=0.01,
+    fixed_snr::Union{Float64, Nothing}=nothing,
+    cs_threshold_dBm::Float64=-110.0,
+    use_shadowing::Bool=true,
+    seed::Int=1234)
+    
+    println("\n=== 継続的送信シミュレーション実行 ===")
+    println("設定:")
+    println("  SF: $sf")
+    println("  端末数: $num_devices")
+    println("  シミュレーション時間: $sim_time 秒")
+    println("  パケット送信間隔: $packet_interval 秒")
+    println("  デューティサイクル: $dc")
+    println("  シャドウイング: $use_shadowing")
+    
+    rng = MersenneTwister(seed)
+    
+    per, positions, snrs, errors, shadowing_vals, packet_counts, success_counts = continuous_csma_dc_per(sf, bw, num_devices;
+        payload_range=payload_range,
+        sim_time=sim_time,
+        backoff_max=backoff_max,
+        dc=dc,
+        packet_interval=packet_interval,
+        fixed_snr=fixed_snr,
+        cs_threshold_dBm=cs_threshold_dBm,
+        use_shadowing=use_shadowing,
+        rng=rng)
+    
+    # 結果表示
+    println("\n=== シミュレーション結果 ===")
+    println("総パケット数: $(sum(packet_counts))")
+    println("成功パケット数: $(sum(success_counts))")
+    println("PER: $per")
+    println("平均SNR: $(mean(snrs)) dB")
+    println("SNR範囲: $(minimum(snrs)) ~ $(maximum(snrs)) dB")
+    
+    println("\n=== 端末別統計 ===")
+    for d in 1:num_devices
+        success_rate = packet_counts[d] > 0 ? success_counts[d] / packet_counts[d] : 0.0
+        println("端末$d: 送信$(packet_counts[d])回, 成功$(success_counts[d])回, 成功率$(success_rate)")
+    end
+    
+    return per, positions, snrs, errors, shadowing_vals, packet_counts, success_counts
+end
+
+# ===== 実行部分に継続的送信SNRスイープを追加 =====
+# 既存の実行フラグに追加
+
 # ===== 実行部分 =====
 println("LoRa シンプルモデル シミュレーション開始")
 println("設定:")
@@ -635,11 +1014,13 @@ sf = SF
 bw = 125e3
 num_devices = 2
 
-# 実行フラグ（SNRスイープ以外はデフォルトで無効化）
-RUN_SINGLE = false  # 可視化のため有効化
+# 実行フラグ
+RUN_SINGLE = false
 RUN_MULTIPLE = false
-RUN_SNR_SWEEP = true  # PER計算のみに変更
-RUN_VISUALIZATION_ONLY = false  # 可視化のみ実行
+RUN_SNR_SWEEP = false
+RUN_CONTINUOUS = false
+RUN_VISUALIZATION_ONLY = false
+RUN_CONTINUOUS_SNR_SWEEP = true  # ← 修正版をテスト
 
 if RUN_VISUALIZATION_ONLY
     # 可視化のみ実行（テスト用）
@@ -690,7 +1071,48 @@ if RUN_SNR_SWEEP
                                    iter=iter_sweep,
                                    cs_threshold_dBm=-110.0,
                                    use_shadowing=true,
-                                   save_path="LoRa_SER/LoRa_Pathloss_CSMA_DC/results_simple_model/snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
+                                   save_path="results_LoRa_simple_model/snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
+end
+
+if RUN_CONTINUOUS
+    println("\n=== 継続的送信シミュレーション ===")
+    per_cont, positions_cont, snrs_cont, errors_cont, shadowing_cont, packet_counts, success_counts = run_continuous_simulation(sf, bw, num_devices;
+        sim_time=10.0,  # 10秒間のシミュレーション
+        packet_interval=2.0,  # 2秒間隔でパケット送信
+        payload_range=(16,32),
+        backoff_max=0.01,
+        dc=0.01,
+        fixed_snr=nothing,  # 距離ベースのSNR
+        cs_threshold_dBm=-110.0,
+        use_shadowing=true,
+        seed=1234)
+    
+    # 可視化
+    plot_node_positions(positions_cont; sf=sf, num_devices=num_devices, save_prefix="continuous_nodes")
+    plot_node_positions_with_errors(positions_cont, snrs_cont, errors_cont; sf=sf, num_devices=num_devices, save_prefix="continuous_errors")
+end
+
+if RUN_CONTINUOUS_SNR_SWEEP
+    println("\n=== 継続的送信SNRスイープ実行 ===")
+    snr_min, snr_max, snr_step = -20.0, 0.0, 0.5
+    iter_sweep = 100  # 継続的送信は計算時間が長いため反復回数を減らす
+    snrs_cont, per_vals_cont = run_continuous_snr_sweep_per(sf, bw, num_devices,
+                                   snr_min, snr_max, snr_step;
+                                   payload_range=(16,32),
+                                   sim_time=10.0,  # 10秒間のシミュレーション
+                                   backoff_max=0.01,
+                                   dc=0.01,
+                                   packet_interval=2.0,  # 2秒間隔でパケット送信
+                                   iter=iter_sweep,
+                                   cs_threshold_dBm=-110.0,
+                                   use_shadowing=true,
+                                   save_path="LoRa_PER/LoRa_PL_DC_CS/results_LoRa_simple_model/continuous_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
+    
+    # 結果の可視化
+    println("\n=== 継続的送信SNRスイープ結果 ===")
+    println("SNR範囲: $(snr_min) ~ $(snr_max) dB")
+    println("最小PER: $(minimum(per_vals_cont))")
+    println("最大PER: $(maximum(per_vals_cont))")
 end
 
 println("\nシミュレーション完了！")
