@@ -33,6 +33,9 @@ const SF = 7
 # SNR閾値（SF7用）
 const SNR_threshold = -7.5
 
+# キャリアセンス閾値(dBm)
+const carrier_sense_threshold = -100.0
+
 # ===== LoRa 基本関数 =====
 @inline function lora_symbol(sf::Int, bw::Float64, m::Int)
     M  = 2^sf
@@ -125,23 +128,113 @@ function generate_poisson_positions(num_devices::Int, rng)
     return positions
 end
 
-# ===== SNR判定関数（先輩のコードを参考） =====
+# ===== DC制約管理 =====
+mutable struct DCConstraint
+    dc_limit::Float64          # DC制約（例: 0.01 = 1%）
+    dc_remaining::Float64      # 残りDC
+    last_reset_time::Float64   # 最後のリセット時刻
+    window_duration::Float64   # DC計算ウィンドウ（秒）
+end
+
+function DCConstraint(dc_limit::Float64, window_duration::Float64=3600.0)
+    return DCConstraint(dc_limit, dc_limit, 0.0, window_duration)
+end
+
+function update_dc_constraint(dc::DCConstraint, current_time::Float64, transmission_duration::Float64)
+    # ウィンドウがリセットされるかチェック
+    if current_time - dc.last_reset_time >= dc.window_duration
+        dc.dc_remaining = dc.dc_limit
+        dc.last_reset_time = current_time
+    end
+    
+    # DC消費
+    dc_consumption = transmission_duration / dc.window_duration
+    dc.dc_remaining = max(0.0, dc.dc_remaining - dc_consumption)
+    
+    return dc.dc_remaining > 0
+end
+
+# ===== キャリアセンス状態管理 =====
+mutable struct CarrierSenseState
+    is_cs_active::Bool           # キャリアセンス実行中
+    cs_detection::Bool           # キャリア検出フラグ
+    cs_start_time::Float64       # キャリアセンス開始時刻
+    cs_duration::Float64         # キャリアセンス時間
+    backoff_until::Float64       # バックオフ終了時刻
+    is_in_backoff::Bool          # バックオフ中フラグ
+end
+
+function CarrierSenseState(cs_duration::Float64=0.005)  # 5msのキャリアセンス
+    return CarrierSenseState(false, false, 0.0, cs_duration, 0.0, false)
+end
+
+# ===== キャリアセンス関数 =====
+function carrier_sense_check(device_id::Int, 
+                           transmitting_devices::Vector{Int},
+                           device_positions::Vector{Tuple{Float64,Float64}},
+                           device_snrs::Vector{Float64},
+                           shadowing_values::Vector{Float64},
+                           carrier_sense_threshold::Float64)
+    
+    # 同じスロットで送信中の端末をチェック
+    if length(transmitting_devices) <= 1
+        return false  # キャリア未検出
+    end
+    
+    # 受信電力の合計を計算
+    total_power_mW = 0.0
+    device_pos = device_positions[device_id]
+    
+    for other_id in transmitting_devices
+        if other_id != device_id
+            # 距離計算
+            other_pos = device_positions[other_id]
+            dist_km = distance(device_pos[1], device_pos[2], other_pos[1], other_pos[2])
+            
+            # 受信電力計算（シャドウイング考慮）
+            received_pwr_dBm = received_power(Tx_dB, dist_km, shadowing_values[other_id])
+            received_pwr_mW = dBm_to_mW(received_pwr_dBm)
+            
+            total_power_mW += received_pwr_mW
+        end
+    end
+    
+    # キャリアセンス閾値と比較
+    if total_power_mW > 0
+        total_power_dBm = mW_to_dBm(total_power_mW)
+        return total_power_dBm >= carrier_sense_threshold
+    else
+        return false
+    end
+end
+
+# ===== バックオフ処理 =====
+function calculate_backoff_time(base_backoff::Float64, max_backoff::Float64, rng)
+    # 指数バックオフ
+    backoff_time = base_backoff * (2.0^rand(rng, 0:10))  # 最大1024倍
+    return min(backoff_time, max_backoff)
+end
+
+# ===== SNR判定関数 =====
 function snr_judge(device_snr::Float64, snr_threshold::Float64)
-    # SNR閾値と比較して判定
     return device_snr >= snr_threshold ? 0 : 1  # 0: 良好, 1: 不良
 end
 
-# ===== 衝突判定関数（先輩のコードを参考） =====
+# ===== 衝突判定関数 =====
 function collision_judge(transmitting_devices::Vector{Int})
-    # 複数端末が同じスロットで送信した場合、衝突
     return length(transmitting_devices) > 1
 end
 
-# ===== 修正版SlottedALOHA実装 =====
-function slotted_aloha_per_fixed(sf::Int, bw::Float64, num_devices::Int;
+# ===== DC制約 + キャリアセンス付きSlottedALOHA実装 =====
+function slotted_aloha_dc_cs_per(sf::Int, bw::Float64, num_devices::Int;
     payload_range::Tuple{Int,Int}=(16,32),
     sim_time::Float64=10.0,
     slot_duration::Float64=0.1,
+    dc_limit::Float64=0.01,  # 1%のDC制約
+    dc_window::Float64=3600.0,  # 1時間のDC計算ウィンドウ
+    cs_duration::Float64=0.005,  # 5msのキャリアセンス
+    backoff_base::Float64=0.1,   # 基本バックオフ時間
+    backoff_max::Float64=10.0,   # 最大バックオフ時間
     fixed_snr::Union{Float64, Nothing}=nothing,
     use_shadowing::Bool=true,
     rng=Random.default_rng())
@@ -171,10 +264,16 @@ function slotted_aloha_per_fixed(sf::Int, bw::Float64, num_devices::Int;
     # スロット数計算
     num_slots = Int(ceil(sim_time / slot_duration))
     
+    # DC制約管理
+    dc_constraints = [DCConstraint(dc_limit, dc_window) for _ in 1:num_devices]
+    
+    # キャリアセンス状態管理
+    cs_states = [CarrierSenseState(cs_duration) for _ in 1:num_devices]
+    
     # 各スロットでの送信端末記録
-    slot_transmissions = Vector{Vector{Int}}()  # 各スロットで送信した端末
-    slot_payloads = Vector{Vector{Vector{Int}}}()  # 各スロットの送信パケット
-    slot_packet_starts = Vector{Vector{Int}}()  # 各スロットのパケット開始サンプル
+    slot_transmissions = Vector{Vector{Int}}()
+    slot_payloads = Vector{Vector{Vector{Int}}}()
+    slot_packet_starts = Vector{Vector{Int}}()
     
     for slot in 1:num_slots
         push!(slot_transmissions, Int[])
@@ -182,29 +281,69 @@ function slotted_aloha_per_fixed(sf::Int, bw::Float64, num_devices::Int;
         push!(slot_packet_starts, Int[])
     end
     
-    # 各端末の送信確率
-    transmission_probability = 0.1
+    # 各端末の送信確率（DC制約を考慮）
+    base_transmission_probability = 0.1
     
-    # 送信スケジュール生成（スロット単位）
+    # 送信スケジュール生成（DC制約 + キャリアセンスを考慮）
     for slot in 1:num_slots
+        current_time = slot * slot_duration
         transmitting_devices = Int[]
         
         for d in 1:num_devices
-            if rand(rng) < transmission_probability
-                push!(transmitting_devices, d)
+            # バックオフ中チェック
+            if cs_states[d].is_in_backoff
+                if current_time >= cs_states[d].backoff_until
+                    cs_states[d].is_in_backoff = false
+                else
+                    continue  # バックオフ中は送信不可
+                end
+            end
+            
+            # DC制約チェック
+            if dc_constraints[d].dc_remaining > 0
+                # 送信確率をDC制約に応じて調整
+                adjusted_probability = base_transmission_probability * 
+                                     min(1.0, dc_constraints[d].dc_remaining / dc_limit)
                 
-                # パケット生成
-                payload_len = rand(rng, payload_range[1]:payload_range[2])
-                payload = [rand(rng, 0:M-1) for _ in 1:payload_len]
-                push!(slot_payloads[slot], copy(payload))
-                
-                # パケット開始サンプル計算
-                slot_start_sample = Int(round((slot - 1) * slot_duration * fs)) + 1
-                push!(slot_packet_starts[slot], slot_start_sample)
+                if rand(rng) < adjusted_probability
+                    # キャリアセンス実行
+                    cs_states[d].is_cs_active = true
+                    cs_states[d].cs_start_time = current_time
+                    
+                    # キャリアセンス結果
+                    cs_detected = carrier_sense_check(d, transmitting_devices, node_positions, 
+                                                   device_snrs, shadowing_values, carrier_sense_threshold)
+                    
+                    if cs_detected
+                        # キャリア検出 → バックオフ
+                        cs_states[d].cs_detection = true
+                        cs_states[d].is_cs_active = false
+                        backoff_time = calculate_backoff_time(backoff_base, backoff_max, rng)
+                        cs_states[d].backoff_until = current_time + backoff_time
+                        cs_states[d].is_in_backoff = true
+                    else
+                        # キャリア未検出 → 送信実行
+                        cs_states[d].cs_detection = false
+                        cs_states[d].is_cs_active = false
+                        push!(transmitting_devices, d)
+                        
+                        # パケット生成
+                        payload_len = rand(rng, payload_range[1]:payload_range[2])
+                        payload = [rand(rng, 0:M-1) for _ in 1:payload_len]
+                        push!(slot_payloads[slot], copy(payload))
+                        
+                        # パケット開始サンプル計算
+                        slot_start_sample = Int(round((slot - 1) * slot_duration * fs)) + 1
+                        push!(slot_packet_starts[slot], slot_start_sample)
+                        
+                        # DC制約更新（送信予定）
+                        transmission_duration = payload_len * Ts
+                        update_dc_constraint(dc_constraints[d], current_time, transmission_duration)
+                    end
+                end
             end
         end
         
-        # 送信端末を記録
         slot_transmissions[slot] = transmitting_devices
     end
     
@@ -220,12 +359,10 @@ function slotted_aloha_per_fixed(sf::Int, bw::Float64, num_devices::Int;
         transmitting_devices = slot_transmissions[slot]
         
         if !isempty(transmitting_devices)
-            # 各送信端末のパケットを送信
             for (device_idx, d) in enumerate(transmitting_devices)
                 payload = slot_payloads[slot][device_idx]
                 packet_start = slot_packet_starts[slot][device_idx]
                 
-                # パケット内の各シンボルを送信
                 for s in 1:length(payload)
                     m = payload[s]
                     if !haskey(sym_cache, m)
@@ -272,35 +409,30 @@ function slotted_aloha_per_fixed(sf::Int, bw::Float64, num_devices::Int;
         end
     end
     
-    # パケット分類とPER計算（先輩のコードを参考）
+    # パケット分類とPER計算（復調結果ベース）
     total_packets = 0
     success_packets = 0
     collision_packets = 0
-    snr_fail_packets = 0
+    demod_fail_packets = 0  # 復調失敗パケット数
+    cs_blocked_packets = 0  # キャリアセンスでブロックされたパケット数
+    backoff_packets = 0     # バックオフでブロックされたパケット数
     
     for slot in 1:num_slots
         transmitting_devices = slot_transmissions[slot]
         
         if !isempty(transmitting_devices)
-            # 衝突判定
             has_collision = collision_judge(transmitting_devices)
             
             for (device_idx, d) in enumerate(transmitting_devices)
                 total_packets += 1
                 
-                # SNR判定
-                snr_result = snr_judge(device_snrs[d], SNR_threshold)
-                
-                if snr_result == 1  # SNR不良
-                    snr_fail_packets += 1
-                elseif has_collision  # 衝突
+                if has_collision  # 衝突
                     collision_packets += 1
-                else  # 成功の可能性（復調チェック）
+                else  # 復調チェック（すべてのSNRで実行）
                     payload = slot_payloads[slot][device_idx]
                     packet_start = slot_packet_starts[slot][device_idx]
                     packet_success = true
                     
-                    # パケット内の各シンボルを復調
                     for s in 1:length(payload)
                         start_idx = packet_start + (s-1) * M
                         end_idx = start_idx + M - 1
@@ -322,80 +454,101 @@ function slotted_aloha_per_fixed(sf::Int, bw::Float64, num_devices::Int;
                     if packet_success
                         success_packets += 1
                     else
-                        snr_fail_packets += 1  # 復調失敗はSNR不良として扱う
+                        demod_fail_packets += 1  # 復調失敗
                     end
                 end
             end
         end
     end
     
-    # PER計算
-    per = total_packets > 0 ? (collision_packets + snr_fail_packets) / total_packets : 0.0
+    # キャリアセンスとバックオフでブロックされたパケット数を計算
+    for d in 1:num_devices
+        for slot in 1:num_slots
+            current_time = slot * slot_duration
+            if cs_states[d].is_in_backoff && current_time < cs_states[d].backoff_until
+                backoff_packets += 1
+            elseif cs_states[d].cs_detection
+                cs_blocked_packets += 1
+            end
+        end
+    end
+    
+    # PER計算（復調結果ベース）
+    per = total_packets > 0 ? (collision_packets + demod_fail_packets) / total_packets : 0.0
     
     # 統計情報
     stats = Dict(
         :total_packets => total_packets,
         :success_packets => success_packets,
         :collision_packets => collision_packets,
-        :snr_fail_packets => snr_fail_packets,
+        :demod_fail_packets => demod_fail_packets,
+        :cs_blocked_packets => cs_blocked_packets,
+        :backoff_packets => backoff_packets,
         :per => per,
         :collision_rate => total_packets > 0 ? collision_packets / total_packets : 0.0,
-        :snr_fail_rate => total_packets > 0 ? snr_fail_packets / total_packets : 0.0
+        :demod_fail_rate => total_packets > 0 ? demod_fail_packets / total_packets : 0.0,
+        :cs_blocked_rate => total_packets > 0 ? cs_blocked_packets / total_packets : 0.0,
+        :backoff_rate => total_packets > 0 ? backoff_packets / total_packets : 0.0
     )
     
     return per, node_positions, device_snrs, stats
 end
 
-# ===== 修正版SlottedALOHA SNRスイープ機能 =====
-function run_slotted_aloha_snr_sweep_fixed(sf::Int, bw::Float64, num_devices::Int,
+# ===== DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ機能 =====
+function run_slotted_aloha_dc_cs_snr_sweep(sf::Int, bw::Float64, num_devices::Int,
     snr_min::Float64, snr_max::Float64, snr_step::Float64;
     payload_range::Tuple{Int,Int}=(16,32),
     sim_time::Float64=10.0,
     slot_duration::Float64=0.1,
+    dc_limit::Float64=0.01,
+    dc_window::Float64=3600.0,
+    cs_duration::Float64=0.005,
+    backoff_base::Float64=0.1,
+    backoff_max::Float64=10.0,
     iter::Int=100,
     seed::Int=1234,
-    save_path::String="results_LoRa_simple_model/slotted_aloha_fixed_snr_sweep_per.csv",
+    save_path::String="results_LoRa_simple_model/slotted_aloha_dc_cs_snr_sweep_per.csv",
     use_shadowing::Bool=true)
 
     rng = MersenneTwister(seed)
     snrs = collect(snr_min:snr_step:snr_max)
     per_vals = zeros(Float64, length(snrs))
-    collision_rates = zeros(Float64, length(snrs))
-    snr_fail_rates = zeros(Float64, length(snrs))
     
-    println("修正版SlottedALOHA SNRスイープ実行中...")
+    println("DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ実行中...")
     println("SNR範囲: $(snr_min) ~ $(snr_max) dB, ステップ: $(snr_step) dB")
     println("反復回数: $iter")
     println("シミュレーション時間: $sim_time 秒")
     println("スロット時間: $slot_duration 秒")
+    println("DC制約: $(dc_limit*100)%")
+    println("DC計算ウィンドウ: $dc_window 秒")
+    println("キャリアセンス時間: $(cs_duration*1000) ms")
+    println("バックオフ時間: $(backoff_base) ~ $(backoff_max) 秒")
     
     for (i, snr) in enumerate(snrs)
         acc_per = 0.0
-        acc_collision_rate = 0.0
-        acc_snr_fail_rate = 0.0
         
         for it in 1:iter
             local_rng = MersenneTwister(seed + it + i * 1000)
             
-            per, positions, snrs_actual, stats = slotted_aloha_per_fixed(sf, bw, num_devices;
+            per, positions, snrs_actual, stats = slotted_aloha_dc_cs_per(sf, bw, num_devices;
                                                payload_range=payload_range,
                                                sim_time=sim_time,
                                                slot_duration=slot_duration,
+                                               dc_limit=dc_limit,
+                                               dc_window=dc_window,
+                                               cs_duration=cs_duration,
+                                               backoff_base=backoff_base,
+                                               backoff_max=backoff_max,
                                                fixed_snr=snr,
                                                use_shadowing=use_shadowing,
                                                rng=local_rng)
             
             acc_per += per
-            acc_collision_rate += stats[:collision_rate]
-            acc_snr_fail_rate += stats[:snr_fail_rate]
         end
         
         per_vals[i] = acc_per / iter
-        collision_rates[i] = acc_collision_rate / iter
-        snr_fail_rates[i] = acc_snr_fail_rate / iter
         
-        @printf("SNR = %5.1f dB, PER = %.6f, Collision = %.6f, SNR_Fail = %.6f\n", 
-                snr, per_vals[i], collision_rates[i], snr_fail_rates[i])
+        @printf("SNR = %5.1f dB, PER = %.6f\n", snr, per_vals[i])
     end
 
     # CSV保存
@@ -404,19 +557,19 @@ function run_slotted_aloha_snr_sweep_fixed(sf::Int, bw::Float64, num_devices::In
     end
     
     open(save_path, "w") do io
-        println(io, "SNR_dB,PER,Collision_Rate,SNR_Fail_Rate")
+        println(io, "SNR_dB,PER")
         for i in 1:length(snrs)
-            println(io, "$(snrs[i]),$(per_vals[i]),$(collision_rates[i]),$(snr_fail_rates[i])")
+            println(io, "$(snrs[i]),$(per_vals[i])")
         end
     end
     
-    @info "修正版SlottedALOHA SNRスイープ結果をCSVに保存しました: $save_path"
+    @info "DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ結果をCSVに保存しました: $save_path"
     
-    return snrs, per_vals, collision_rates, snr_fail_rates
+    return snrs, per_vals
 end
 
 # ===== メイン実行部分 =====
-println("修正版LoRa SlottedALOHA シミュレーション")
+println("DC制約 + キャリアセンス付きLoRa SlottedALOHA シミュレーション")
 println("設定:")
 println("  SF: $(SF)")
 println("  エリアサイズ: $(area_size) km")
@@ -425,32 +578,43 @@ println("  搬送波周波数: $(f_c) MHz")
 println("  パスロス係数: α=$(α), β=$(β), γ=$(γ)")
 println("  シャドウイング標準偏差: $(shadowing_std) dB")
 println("  SNR閾値: $(SNR_threshold) dB")
+println("  キャリアセンス閾値: $(carrier_sense_threshold) dBm")
 
 # パラメータ設定
 sf = SF
 bw = 125e3
-num_devices = 2
+num_devices = 10
 
-# 修正版SlottedALOHA SNRスイープ実行
-println("\n=== 修正版SlottedALOHA SNRスイープ実行 ===")
+# DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ実行
+println("\n=== DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ実行 ===")
 snr_min, snr_max, snr_step = -20.0, 0.0, 0.5
 iter_sweep = 1000
+dc_limit = 0.01  # 1%のDC制約
+cs_duration = 0.005  # 5msのキャリアセンス
+backoff_base = 0.1   # 基本バックオフ時間
+backoff_max = 10.0   # 最大バックオフ時間
 
-snrs_fixed, per_vals_fixed, collision_rates, snr_fail_rates = run_slotted_aloha_snr_sweep_fixed(sf, bw, num_devices,
+snrs_dc_cs, per_vals_dc_cs = run_slotted_aloha_dc_cs_snr_sweep(sf, bw, num_devices,
                                snr_min, snr_max, snr_step;
                                payload_range=(16,32),
                                sim_time=10.0,
                                slot_duration=0.1,
+                               dc_limit=dc_limit,
+                               dc_window=3600.0,
+                               cs_duration=cs_duration,
+                               backoff_base=backoff_base,
+                               backoff_max=backoff_max,
                                iter=iter_sweep,
                                use_shadowing=true,
-                               save_path="LoRa_PER/LoRa_PL_DC_CS/results_SlottedALOHA/slotted_aloha_fixed_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
+                               save_path="LoRa_PER/LoRa_PL_DC_CS/results_SlottedALOHA/slotted_aloha_dc_cs_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
 
 # 結果の表示
-println("\n=== 修正版SlottedALOHA SNRスイープ結果 ===")
+println("\n=== DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ結果 ===")
 println("SNR範囲: $(snr_min) ~ $(snr_max) dB")
-println("最小PER: $(minimum(per_vals_fixed))")
-println("最大PER: $(maximum(per_vals_fixed))")
-println("平均衝突率: $(mean(collision_rates))")
-println("平均SNR失敗率: $(mean(snr_fail_rates))")
+println("DC制約: $(dc_limit*100)%")
+println("キャリアセンス時間: $(cs_duration*1000) ms")
+println("バックオフ時間: $(backoff_base) ~ $(backoff_max) 秒")
+println("最小PER: $(minimum(per_vals_dc_cs))")
+println("最大PER: $(maximum(per_vals_dc_cs))")
 
 println("\nシミュレーション完了！")

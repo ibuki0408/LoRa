@@ -33,6 +33,16 @@ const SF = 7
 # SNR閾値（SF7用）
 const SNR_threshold = -7.5
 
+# キャリアセンス閾値(dBm)
+const carrier_sense_threshold = -100.0
+
+# ===== クロックドリフト関連パラメータ =====
+# クロックドリフトの範囲（ppm）
+const CLOCK_DRIFT_MIN_PPM = -50.0  # 低コスト水晶発振器
+const CLOCK_DRIFT_MAX_PPM = 50.0   # 低コスト水晶発振器
+const CLOCK_DRIFT_HIGH_ACCURACY_MIN_PPM = -5.0  # 高精度水晶発振器
+const CLOCK_DRIFT_HIGH_ACCURACY_MAX_PPM = 5.0   # 高精度水晶発振器
+
 # ===== LoRa 基本関数 =====
 @inline function lora_symbol(sf::Int, bw::Float64, m::Int)
     M  = 2^sf
@@ -125,6 +135,44 @@ function generate_poisson_positions(num_devices::Int, rng)
     return positions
 end
 
+# ===== クロックドリフト管理 =====
+mutable struct ClockDrift
+    drift_ppm::Float64           # クロックドリフト（ppm）
+    accumulated_drift::Float64   # 蓄積された時刻ずれ（秒）
+    last_update_time::Float64    # 最後の更新時刻
+end
+
+function ClockDrift(drift_ppm::Float64)
+    return ClockDrift(drift_ppm, 0.0, 0.0)
+end
+
+function update_clock_drift(clock::ClockDrift, current_time::Float64)
+    # 前回の更新からの経過時間
+    elapsed_time = current_time - clock.last_update_time
+    
+    # クロックドリフトによる時刻ずれの蓄積
+    drift_seconds = clock.drift_ppm * 1e-6 * elapsed_time
+    clock.accumulated_drift += drift_seconds
+    clock.last_update_time = current_time
+    
+    return clock.accumulated_drift
+end
+
+function get_drifted_time(clock::ClockDrift, reference_time::Float64)
+    # 基準時刻にクロックドリフトを適用
+    return reference_time + clock.accumulated_drift
+end
+
+# クロックドリフト生成関数
+function generate_clock_drift(rng, accuracy_level::Symbol=:standard)
+    if accuracy_level == :high
+        drift_ppm = rand(rng) * (CLOCK_DRIFT_HIGH_ACCURACY_MAX_PPM - CLOCK_DRIFT_HIGH_ACCURACY_MIN_PPM) + CLOCK_DRIFT_HIGH_ACCURACY_MIN_PPM
+    else  # :standard
+        drift_ppm = rand(rng) * (CLOCK_DRIFT_MAX_PPM - CLOCK_DRIFT_MIN_PPM) + CLOCK_DRIFT_MIN_PPM
+    end
+    return ClockDrift(drift_ppm)
+end
+
 # ===== DC制約管理 =====
 mutable struct DCConstraint
     dc_limit::Float64          # DC制約（例: 0.01 = 1%）
@@ -151,6 +199,67 @@ function update_dc_constraint(dc::DCConstraint, current_time::Float64, transmiss
     return dc.dc_remaining > 0
 end
 
+# ===== キャリアセンス状態管理 =====
+mutable struct CarrierSenseState
+    is_cs_active::Bool           # キャリアセンス実行中
+    cs_detection::Bool           # キャリア検出フラグ
+    cs_start_time::Float64       # キャリアセンス開始時刻
+    cs_duration::Float64         # キャリアセンス時間
+    backoff_until::Float64       # バックオフ終了時刻
+    is_in_backoff::Bool          # バックオフ中フラグ
+end
+
+function CarrierSenseState(cs_duration::Float64=0.005)  # 5msのキャリアセンス
+    return CarrierSenseState(false, false, 0.0, cs_duration, 0.0, false)
+end
+
+# ===== キャリアセンス関数 =====
+function carrier_sense_check(device_id::Int, 
+                           transmitting_devices::Vector{Int},
+                           device_positions::Vector{Tuple{Float64,Float64}},
+                           device_snrs::Vector{Float64},
+                           shadowing_values::Vector{Float64},
+                           carrier_sense_threshold::Float64)
+    
+    # 同じスロットで送信中の端末をチェック
+    if length(transmitting_devices) <= 1
+        return false  # キャリア未検出
+    end
+    
+    # 受信電力の合計を計算
+    total_power_mW = 0.0
+    device_pos = device_positions[device_id]
+    
+    for other_id in transmitting_devices
+        if other_id != device_id
+            # 距離計算
+            other_pos = device_positions[other_id]
+            dist_km = distance(device_pos[1], device_pos[2], other_pos[1], other_pos[2])
+            
+            # 受信電力計算（シャドウイング考慮）
+            received_pwr_dBm = received_power(Tx_dB, dist_km, shadowing_values[other_id])
+            received_pwr_mW = dBm_to_mW(received_pwr_dBm)
+            
+            total_power_mW += received_pwr_mW
+        end
+    end
+    
+    # キャリアセンス閾値と比較
+    if total_power_mW > 0
+        total_power_dBm = mW_to_dBm(total_power_mW)
+        return total_power_dBm >= carrier_sense_threshold
+    else
+        return false
+    end
+end
+
+# ===== バックオフ処理 =====
+function calculate_backoff_time(base_backoff::Float64, max_backoff::Float64, rng)
+    # 指数バックオフ
+    backoff_time = base_backoff * (2.0^rand(rng, 0:10))  # 最大1024倍
+    return min(backoff_time, max_backoff)
+end
+
 # ===== SNR判定関数 =====
 function snr_judge(device_snr::Float64, snr_threshold::Float64)
     return device_snr >= snr_threshold ? 0 : 1  # 0: 良好, 1: 不良
@@ -161,13 +270,29 @@ function collision_judge(transmitting_devices::Vector{Int})
     return length(transmitting_devices) > 1
 end
 
-# ===== DC制約付きSlottedALOHA実装 =====
-function slotted_aloha_dc_per(sf::Int, bw::Float64, num_devices::Int;
+# ===== クロックドリフトを考慮したスロット開始時刻計算 =====
+function calculate_drifted_slot_start(device_clock::ClockDrift, slot::Int, slot_duration::Float64, fs::Float64)
+    # 基準スロット開始時刻
+    reference_slot_start = (slot - 1) * slot_duration
+    
+    # クロックドリフトを適用した時刻
+    drifted_time = get_drifted_time(device_clock, reference_slot_start)
+    
+    # サンプルインデックスに変換
+    return Int(round(drifted_time * fs)) + 1
+end
+
+# ===== クロックドリフト + DC制約 + キャリアセンス付きSlottedALOHA実装 =====
+function slotted_aloha_dc_cs_clock_drift_per(sf::Int, bw::Float64, num_devices::Int;
     payload_range::Tuple{Int,Int}=(16,32),
     sim_time::Float64=10.0,
     slot_duration::Float64=0.1,
     dc_limit::Float64=0.01,  # 1%のDC制約
     dc_window::Float64=3600.0,  # 1時間のDC計算ウィンドウ
+    cs_duration::Float64=0.005,  # 5msのキャリアセンス
+    backoff_base::Float64=0.1,   # 基本バックオフ時間
+    backoff_max::Float64=10.0,   # 最大バックオフ時間
+    clock_accuracy::Symbol=:standard,  # :standard または :high
     fixed_snr::Union{Float64, Nothing}=nothing,
     use_shadowing::Bool=true,
     rng=Random.default_rng())
@@ -200,6 +325,12 @@ function slotted_aloha_dc_per(sf::Int, bw::Float64, num_devices::Int;
     # DC制約管理
     dc_constraints = [DCConstraint(dc_limit, dc_window) for _ in 1:num_devices]
     
+    # キャリアセンス状態管理
+    cs_states = [CarrierSenseState(cs_duration) for _ in 1:num_devices]
+    
+    # クロックドリフト管理
+    clock_drifts = [generate_clock_drift(rng, clock_accuracy) for _ in 1:num_devices]
+    
     # 各スロットでの送信端末記録
     slot_transmissions = Vector{Vector{Int}}()
     slot_payloads = Vector{Vector{Vector{Int}}}()
@@ -214,12 +345,24 @@ function slotted_aloha_dc_per(sf::Int, bw::Float64, num_devices::Int;
     # 各端末の送信確率（DC制約を考慮）
     base_transmission_probability = 0.1
     
-    # 送信スケジュール生成（DC制約を考慮）
+    # 送信スケジュール生成（クロックドリフト + DC制約 + キャリアセンスを考慮）
     for slot in 1:num_slots
         current_time = slot * slot_duration
         transmitting_devices = Int[]
         
         for d in 1:num_devices
+            # クロックドリフト更新
+            update_clock_drift(clock_drifts[d], current_time)
+            
+            # バックオフ中チェック
+            if cs_states[d].is_in_backoff
+                if current_time >= cs_states[d].backoff_until
+                    cs_states[d].is_in_backoff = false
+                else
+                    continue  # バックオフ中は送信不可
+                end
+            end
+            
             # DC制約チェック
             if dc_constraints[d].dc_remaining > 0
                 # 送信確率をDC制約に応じて調整
@@ -227,20 +370,40 @@ function slotted_aloha_dc_per(sf::Int, bw::Float64, num_devices::Int;
                                      min(1.0, dc_constraints[d].dc_remaining / dc_limit)
                 
                 if rand(rng) < adjusted_probability
-                    push!(transmitting_devices, d)
+                    # キャリアセンス実行
+                    cs_states[d].is_cs_active = true
+                    cs_states[d].cs_start_time = current_time
                     
-                    # パケット生成
-                    payload_len = rand(rng, payload_range[1]:payload_range[2])
-                    payload = [rand(rng, 0:M-1) for _ in 1:payload_len]
-                    push!(slot_payloads[slot], copy(payload))
+                    # キャリアセンス結果
+                    cs_detected = carrier_sense_check(d, transmitting_devices, node_positions, 
+                                                   device_snrs, shadowing_values, carrier_sense_threshold)
                     
-                    # パケット開始サンプル計算
-                    slot_start_sample = Int(round((slot - 1) * slot_duration * fs)) + 1
-                    push!(slot_packet_starts[slot], slot_start_sample)
-                    
-                    # DC制約更新（送信予定）
-                    transmission_duration = payload_len * Ts
-                    update_dc_constraint(dc_constraints[d], current_time, transmission_duration)
+                    if cs_detected
+                        # キャリア検出 → バックオフ
+                        cs_states[d].cs_detection = true
+                        cs_states[d].is_cs_active = false
+                        backoff_time = calculate_backoff_time(backoff_base, backoff_max, rng)
+                        cs_states[d].backoff_until = current_time + backoff_time
+                        cs_states[d].is_in_backoff = true
+                    else
+                        # キャリア未検出 → 送信実行
+                        cs_states[d].cs_detection = false
+                        cs_states[d].is_cs_active = false
+                        push!(transmitting_devices, d)
+                        
+                        # パケット生成
+                        payload_len = rand(rng, payload_range[1]:payload_range[2])
+                        payload = [rand(rng, 0:M-1) for _ in 1:payload_len]
+                        push!(slot_payloads[slot], copy(payload))
+                        
+                        # クロックドリフトを考慮したパケット開始サンプル計算
+                        packet_start = calculate_drifted_slot_start(clock_drifts[d], slot, slot_duration, fs)
+                        push!(slot_packet_starts[slot], packet_start)
+                        
+                        # DC制約更新（送信予定）
+                        transmission_duration = payload_len * Ts
+                        update_dc_constraint(dc_constraints[d], current_time, transmission_duration)
+                    end
                 end
             end
         end
@@ -315,7 +478,9 @@ function slotted_aloha_dc_per(sf::Int, bw::Float64, num_devices::Int;
     success_packets = 0
     collision_packets = 0
     demod_fail_packets = 0  # 復調失敗パケット数
-    dc_blocked_packets = 0  # DC制約でブロックされたパケット数
+    cs_blocked_packets = 0  # キャリアセンスでブロックされたパケット数
+    backoff_packets = 0     # バックオフでブロックされたパケット数
+    clock_drift_packets = 0 # クロックドリフトによる送信タイミングずれパケット数
     
     for slot in 1:num_slots
         transmitting_devices = slot_transmissions[slot]
@@ -361,12 +526,27 @@ function slotted_aloha_dc_per(sf::Int, bw::Float64, num_devices::Int;
         end
     end
     
-    # DC制約でブロックされたパケット数を計算
+    # キャリアセンスとバックオフでブロックされたパケット数を計算
     for d in 1:num_devices
         for slot in 1:num_slots
             current_time = slot * slot_duration
-            if dc_constraints[d].dc_remaining <= 0
-                dc_blocked_packets += 1
+            if cs_states[d].is_in_backoff && current_time < cs_states[d].backoff_until
+                backoff_packets += 1
+            elseif cs_states[d].cs_detection
+                cs_blocked_packets += 1
+            end
+        end
+    end
+    
+    # クロックドリフトによる送信タイミングずれを検出
+    for d in 1:num_devices
+        for slot in 1:num_slots
+            current_time = slot * slot_duration
+            update_clock_drift(clock_drifts[d], current_time)
+            
+            # クロックドリフトがスロット時間の一定割合を超えた場合
+            if abs(clock_drifts[d].accumulated_drift) > slot_duration * 0.1  # 10%以上ずれ
+                clock_drift_packets += 1
             end
         end
     end
@@ -380,73 +560,76 @@ function slotted_aloha_dc_per(sf::Int, bw::Float64, num_devices::Int;
         :success_packets => success_packets,
         :collision_packets => collision_packets,
         :demod_fail_packets => demod_fail_packets,
-        :dc_blocked_packets => dc_blocked_packets,
+        :cs_blocked_packets => cs_blocked_packets,
+        :backoff_packets => backoff_packets,
+        :clock_drift_packets => clock_drift_packets,
         :per => per,
         :collision_rate => total_packets > 0 ? collision_packets / total_packets : 0.0,
         :demod_fail_rate => total_packets > 0 ? demod_fail_packets / total_packets : 0.0,
-        :dc_blocked_rate => total_packets > 0 ? dc_blocked_packets / total_packets : 0.0
+        :cs_blocked_rate => total_packets > 0 ? cs_blocked_packets / total_packets : 0.0,
+        :backoff_rate => total_packets > 0 ? backoff_packets / total_packets : 0.0,
+        :clock_drift_rate => total_packets > 0 ? clock_drift_packets / total_packets : 0.0
     )
     
-    return per, node_positions, device_snrs, stats
+    return per, node_positions, device_snrs, stats, clock_drifts
 end
 
-# ===== DC制約付きSlottedALOHA SNRスイープ機能 =====
-function run_slotted_aloha_dc_snr_sweep(sf::Int, bw::Float64, num_devices::Int,
+# ===== クロックドリフト + DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ機能 =====
+function run_slotted_aloha_dc_cs_clock_drift_snr_sweep(sf::Int, bw::Float64, num_devices::Int,
     snr_min::Float64, snr_max::Float64, snr_step::Float64;
     payload_range::Tuple{Int,Int}=(16,32),
     sim_time::Float64=10.0,
     slot_duration::Float64=0.1,
     dc_limit::Float64=0.01,
     dc_window::Float64=3600.0,
+    cs_duration::Float64=0.005,
+    backoff_base::Float64=0.1,
+    backoff_max::Float64=10.0,
+    clock_accuracy::Symbol=:standard,
     iter::Int=100,
     seed::Int=1234,
-    save_path::String="results_LoRa_simple_model/slotted_aloha_dc_snr_sweep_per.csv",
+    save_path::String="results_LoRa_simple_model/slotted_aloha_dc_cs_clock_drift_snr_sweep_per.csv",
     use_shadowing::Bool=true)
 
     rng = MersenneTwister(seed)
     snrs = collect(snr_min:snr_step:snr_max)
     per_vals = zeros(Float64, length(snrs))
-    collision_rates = zeros(Float64, length(snrs))
-    demod_fail_rates = zeros(Float64, length(snrs))
-    dc_blocked_rates = zeros(Float64, length(snrs))
     
-    println("DC制約付きSlottedALOHA SNRスイープ実行中...")
+    println("クロックドリフト + DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ実行中...")
     println("SNR範囲: $(snr_min) ~ $(snr_max) dB, ステップ: $(snr_step) dB")
     println("反復回数: $iter")
     println("シミュレーション時間: $sim_time 秒")
     println("スロット時間: $slot_duration 秒")
     println("DC制約: $(dc_limit*100)%")
     println("DC計算ウィンドウ: $dc_window 秒")
+    println("キャリアセンス時間: $(cs_duration*1000) ms")
+    println("バックオフ時間: $(backoff_base) ~ $(backoff_max) 秒")
+    println("クロック精度: $clock_accuracy")
     
     for (i, snr) in enumerate(snrs)
         acc_per = 0.0
-        acc_collision_rate = 0.0
-        acc_demod_fail_rate = 0.0
-        acc_dc_blocked_rate = 0.0
         
         for it in 1:iter
             local_rng = MersenneTwister(seed + it + i * 1000)
             
-            per, positions, snrs_actual, stats = slotted_aloha_dc_per(sf, bw, num_devices;
+            per, positions, snrs_actual, stats, clock_drifts = slotted_aloha_dc_cs_clock_drift_per(sf, bw, num_devices;
                                                payload_range=payload_range,
                                                sim_time=sim_time,
                                                slot_duration=slot_duration,
                                                dc_limit=dc_limit,
                                                dc_window=dc_window,
+                                               cs_duration=cs_duration,
+                                               backoff_base=backoff_base,
+                                               backoff_max=backoff_max,
+                                               clock_accuracy=clock_accuracy,
                                                fixed_snr=snr,
                                                use_shadowing=use_shadowing,
                                                rng=local_rng)
             
             acc_per += per
-            acc_collision_rate += stats[:collision_rate]
-            acc_demod_fail_rate += stats[:demod_fail_rate]
-            acc_dc_blocked_rate += stats[:dc_blocked_rate]
         end
         
         per_vals[i] = acc_per / iter
-        collision_rates[i] = acc_collision_rate / iter
-        demod_fail_rates[i] = acc_demod_fail_rate / iter
-        dc_blocked_rates[i] = acc_dc_blocked_rate / iter
         
         @printf("SNR = %5.1f dB, PER = %.6f\n", snr, per_vals[i])
     end
@@ -457,19 +640,19 @@ function run_slotted_aloha_dc_snr_sweep(sf::Int, bw::Float64, num_devices::Int,
     end
     
     open(save_path, "w") do io
-        println(io, "SNR_dB,PER,Collision_Rate,Demod_Fail_Rate,DC_Blocked_Rate")
+        println(io, "SNR_dB,PER")
         for i in 1:length(snrs)
-            println(io, "$(snrs[i]),$(per_vals[i]),$(collision_rates[i]),$(demod_fail_rates[i]),$(dc_blocked_rates[i])")
+            println(io, "$(snrs[i]),$(per_vals[i])")
         end
     end
     
-    @info "DC制約付きSlottedALOHA SNRスイープ結果をCSVに保存しました: $save_path"
+    @info "クロックドリフト + DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ結果をCSVに保存しました: $save_path"
     
-    return snrs, per_vals, collision_rates, demod_fail_rates, dc_blocked_rates
+    return snrs, per_vals
 end
 
 # ===== メイン実行部分 =====
-println("DC制約付きLoRa SlottedALOHA シミュレーション")
+println("クロックドリフト + DC制約 + キャリアセンス付きLoRa SlottedALOHA シミュレーション")
 println("設定:")
 println("  SF: $(SF)")
 println("  エリアサイズ: $(area_size) km")
@@ -478,34 +661,47 @@ println("  搬送波周波数: $(f_c) MHz")
 println("  パスロス係数: α=$(α), β=$(β), γ=$(γ)")
 println("  シャドウイング標準偏差: $(shadowing_std) dB")
 println("  SNR閾値: $(SNR_threshold) dB")
+println("  キャリアセンス閾値: $(carrier_sense_threshold) dBm")
+println("  クロックドリフト範囲: $(CLOCK_DRIFT_MIN_PPM) ~ $(CLOCK_DRIFT_MAX_PPM) ppm")
 
 # パラメータ設定
 sf = SF
 bw = 125e3
 num_devices = 10
 
-# DC制約付きSlottedALOHA SNRスイープ実行
-println("\n=== DC制約付きSlottedALOHA SNRスイープ実行 ===")
+# クロックドリフト + DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ実行
+println("\n=== クロックドリフト + DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ実行 ===")
 snr_min, snr_max, snr_step = -20.0, 0.0, 0.5
 iter_sweep = 1000
 dc_limit = 0.01  # 1%のDC制約
+cs_duration = 0.005  # 5msのキャリアセンス
+backoff_base = 0.1   # 基本バックオフ時間
+backoff_max = 10.0   # 最大バックオフ時間
+clock_accuracy = :standard  # 標準精度のクロック
 
-snrs_dc, per_vals_dc, collision_rates, demod_fail_rates, dc_blocked_rates = run_slotted_aloha_dc_snr_sweep(sf, bw, num_devices,
+snrs_clock_drift, per_vals_clock_drift = run_slotted_aloha_dc_cs_clock_drift_snr_sweep(sf, bw, num_devices,
                                snr_min, snr_max, snr_step;
                                payload_range=(16,32),
                                sim_time=10.0,
                                slot_duration=0.1,
                                dc_limit=dc_limit,
                                dc_window=3600.0,
+                               cs_duration=cs_duration,
+                               backoff_base=backoff_base,
+                               backoff_max=backoff_max,
+                               clock_accuracy=clock_accuracy,
                                iter=iter_sweep,
                                use_shadowing=true,
-                               save_path="LoRa_PER/LoRa_PL_DC_CS/results_SlottedALOHA/slotted_aloha_dc_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
+                               save_path="LoRa_PER/LoRa_PL_DC_CS/results_SlottedALOHA/slotted_aloha_dc_cs_clock_drift_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
 
 # 結果の表示
-println("\n=== DC制約付きSlottedALOHA SNRスイープ結果 ===")
+println("\n=== クロックドリフト + DC制約 + キャリアセンス付きSlottedALOHA SNRスイープ結果 ===")
 println("SNR範囲: $(snr_min) ~ $(snr_max) dB")
 println("DC制約: $(dc_limit*100)%")
-println("最小PER: $(minimum(per_vals_dc))")
-println("最大PER: $(maximum(per_vals_dc))")
+println("キャリアセンス時間: $(cs_duration*1000) ms")
+println("バックオフ時間: $(backoff_base) ~ $(backoff_max) 秒")
+println("クロック精度: $clock_accuracy")
+println("最小PER: $(minimum(per_vals_clock_drift))")
+println("最大PER: $(maximum(per_vals_clock_drift))")
 
 println("\nシミュレーション完了！")

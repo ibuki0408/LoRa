@@ -455,7 +455,7 @@ println("  シャドウイング標準偏差: $(shadowing_std) dB")
 # パラメータ設定
 sf = SF
 bw = 125e3
-num_devices = 2
+num_devices = 10
 
 # SNRスイープ実行
 println("\n=== 継続的送信SNRスイープ実行 ===")
@@ -472,7 +472,7 @@ snrs_cont, per_vals_cont = run_continuous_snr_sweep_per(sf, bw, num_devices,
                                iter=iter_sweep,
                                cs_threshold_dBm=-110.0,
                                use_shadowing=true,
-                               save_path="LoRa_PER/LoRa_PL_DC_CS/results_LoRa_simple_model/continuous_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
+                               save_path="LoRa_PER/LoRa_PL_DC_CS/results_CSMA/continuous_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
 
 # 結果の表示
 println("\n=== 継続的送信SNRスイープ結果 ===")

@@ -1106,7 +1106,7 @@ if RUN_CONTINUOUS_SNR_SWEEP
                                    iter=iter_sweep,
                                    cs_threshold_dBm=-110.0,
                                    use_shadowing=true,
-                                   save_path="LoRa_PER/LoRa_PL_DC_CS/results_LoRa_simple_model/continuous_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
+                                   save_path="LoRa_PER/LoRa_PL_DC_CS/results_CSMA/continuous_snr_sweep_per_sf$(sf)_dev$(num_devices)_iter$(iter_sweep).csv")
     
     # 結果の可視化
     println("\n=== 継続的送信SNRスイープ結果 ===")
