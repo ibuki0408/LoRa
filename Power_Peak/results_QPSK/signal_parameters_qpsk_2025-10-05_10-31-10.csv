@@ -1,0 +1,8 @@
+parameter,value
+Duration (ms),0.1428
+Bandwidth (MHz),3.6
+Center Frequency (GHz),4.7
+Sampling Rate (MHz),10.0
+Sample Count,1428
+Modulation,QPSK
+Execution Time,2025-10-05_10-31-10

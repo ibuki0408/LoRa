@@ -1,4 +1,4 @@
-using Random, Statistics, Printf, FFTW, LinearAlgebra, DSP, Distributions, CSV, DataFrames, Plots
+using Random, Statistics, Printf, FFTW, LinearAlgebra, DSP, Distributions, CSV, DataFrames, Plots, Dates
 
 # ===== 信号パラメータ =====
 struct SignalParameters
@@ -43,6 +43,10 @@ function generate_ofdm_signal_with_qpsk(bandwidth_hz::Float64, duration_s::Float
     start_bin = div(N, 2) - div(bw_bins, 2)
     end_bin = div(N, 2) + div(bw_bins, 2)
     
+    # バウンドチェック
+    start_bin = max(1, start_bin)
+    end_bin = min(N, end_bin)
+    
     for i in start_bin:end_bin
         # 各サブキャリアに、ランダムなQPSKシンボルを1つ配置する
         freq_domain_signal[i] = generate_qpsk_symbol()
@@ -60,6 +64,9 @@ function save_signal_to_csv(signal_complex::Vector{ComplexF64}, sampling_rate::F
     N = length(signal_complex)
     time_axis = (0:N-1) / sampling_rate * 1000  # ms単位
     freq_axis = fftfreq(N, sampling_rate) / 1e6  # MHz単位
+    
+    # 実行時刻を取得
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
     
     # 時間領域データ
     time_data = DataFrame(
@@ -80,14 +87,14 @@ function save_signal_to_csv(signal_complex::Vector{ComplexF64}, sampling_rate::F
     
     # パラメータ情報
     params_data = DataFrame(
-        parameter = ["Duration (ms)", "Bandwidth (MHz)", "Center Frequency (GHz)", "Sampling Rate (MHz)", "Sample Count", "Modulation"],
-        value = [params.duration_s*1000, params.bandwidth_hz/1e6, params.center_frequency_hz/1e9, params.sampling_rate_hz/1e6, N, "QPSK"]
+        parameter = ["Duration (ms)", "Bandwidth (MHz)", "Center Frequency (GHz)", "Sampling Rate (MHz)", "Sample Count", "Modulation", "Execution Time"],
+        value = [params.duration_s*1000, params.bandwidth_hz/1e6, params.center_frequency_hz/1e9, params.sampling_rate_hz/1e6, N, "QPSK", timestamp]
     )
     
-    # CSVファイルに保存
-    CSV.write("$(output_dir)/time_domain_data_qpsk.csv", time_data)
-    CSV.write("$(output_dir)/frequency_domain_data_qpsk.csv", freq_data)
-    CSV.write("$(output_dir)/signal_parameters_qpsk.csv", params_data)
+    # CSVファイルに保存（タイムスタンプ付き）
+    CSV.write("$(output_dir)/time_domain_data_qpsk_$(timestamp).csv", time_data)
+    CSV.write("$(output_dir)/frequency_domain_data_qpsk_$(timestamp).csv", freq_data)
+    CSV.write("$(output_dir)/signal_parameters_qpsk_$(timestamp).csv", params_data)
     
     return time_data, freq_data, params_data
 end
@@ -133,10 +140,13 @@ function save_signal_to_png(signal_complex::Vector{ComplexF64}, sampling_rate::F
     gr()
     default(fontfamily="Arial")
     
+    # 実行時刻を取得
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    
     title_prefix = "OFDM-like Signal (QPSK Modulation)"
     combined_plot = plot_signal_comprehensive(signal_complex, sampling_rate, title_prefix)
     
-    savefig(combined_plot, "$(output_dir)/signal_visualization_qpsk.png")
+    savefig(combined_plot, "$(output_dir)/signal_visualization_qpsk_$(timestamp).png")
     
     return combined_plot
 end
@@ -160,8 +170,8 @@ function main(output_mode::String="csv")
     params = SignalParameters(
         142.8e-6,   # 持続時間: 142.8 µs
         4.7e9,      # 中心周波数
-        7.2e6,      # 帯域幅: 7.2 MHz
-        15.36e6     # サンプリングレート: 15.36 MHz
+        1.0e6,      # 帯域幅: 3.6 MHz（7.2MHz→3.6MHzに半減）
+        2.0e6      # サンプリングレート: 10 MHz（帯域幅の約2.8倍）
     )
     
     println("信号パラメータ:")
@@ -197,11 +207,19 @@ function main(output_mode::String="csv")
     output_dir = "results_QPSK"
     mkpath(output_dir)
     
+    # 実行時刻を取得
+    execution_timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    println("実行時刻: $(execution_timestamp)")
+    println()
+    
     # 出力処理
     if output_mode == "csv" || output_mode == "both"
         println("CSVファイルを生成中...")
         save_signal_to_csv(signal_complex, params.sampling_rate_hz, params, output_dir)
         println("CSVファイルを '$(output_dir)' に保存しました。")
+        println("• time_domain_data_qpsk_$(execution_timestamp).csv")
+        println("• frequency_domain_data_qpsk_$(execution_timestamp).csv")
+        println("• signal_parameters_qpsk_$(execution_timestamp).csv")
         println()
     end
     
@@ -209,6 +227,7 @@ function main(output_mode::String="csv")
         println("PNGファイルを生成中...")
         save_signal_to_png(signal_complex, params.sampling_rate_hz, output_dir)
         println("PNGファイルを '$(output_dir)' に保存しました。")
+        println("• signal_visualization_qpsk_$(execution_timestamp).png")
         println()
     end
     
