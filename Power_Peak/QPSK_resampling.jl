@@ -54,7 +54,6 @@ end
 # ===== ノイズパラメータ =====
 struct NoiseParameters
     noise_power_dbm::Float64  # ノイズ電力（dBm）
-    snr_db::Float64          # 目標SNR（dB）
 end
 
 # ===== シミュレーションパラメータ（一括設定） =====
@@ -69,7 +68,6 @@ struct SimulationParameters
     tx_power_dbm::Float64            # 送信電力（dBm）
     
     # 受信環境パラメータ
-    snr_db::Float64                  # 信号対雑音比（dB）
     shadowing_enabled::Bool          # シャドウイング有効/無効
     shadowing_std_db::Float64        # シャドウイング標準偏差（dB）
     
@@ -111,7 +109,7 @@ function calculate_shadowing(shadowing_params::ShadowingParameters, distance_m::
 end
 
 # ===== OFDM信号生成（QPSK変調） =====
-function generate_ofdm_signal_with_qpsk(bandwidth_hz::Float64, duration_s::Float64, fs_hz::Float64)
+function generate_ofdm_signal_with_qpsk(bandwidth_hz::Float64, duration_s::Float64, fs_hz::Float64, tx_power_dbm::Float64)
     # サンプル数とFFTサイズを計算
     N = Int(ceil(duration_s * fs_hz))
     N = max(N, 1)  # 最低1サンプル
@@ -146,8 +144,9 @@ function generate_ofdm_signal_with_qpsk(bandwidth_hz::Float64, duration_s::Float
     # IFFTで時間ドメイン信号を生成
     time_domain = ifft(freq_domain)
     
-    # 正規化
-    time_domain = time_domain / sqrt(mean(abs2.(time_domain)))
+    # 送信電力に合わせてスケーリング（正規化の代わり）
+    linear_power = 10^(tx_power_dbm / 10) * 1e-3  # dBm → W
+    time_domain = time_domain * sqrt(linear_power)
     
     return time_domain
 end
@@ -160,7 +159,7 @@ function generate_periodic_sync_signals(params::SignalParameters, interval_ms::F
     
     # 信号送信タイミングを計算
     signal_times = Float64[]
-    start_delay_ms = 5.0  # 開始遅延（ms）
+    start_delay_ms = 10.0  # 開始遅延（ms）
     current_time = start_delay_ms
     while current_time + signal_duration_ms <= total_duration_ms
         push!(signal_times, current_time)
@@ -175,7 +174,7 @@ function generate_periodic_sync_signals(params::SignalParameters, interval_ms::F
     signal_count = 0
     for signal_time in signal_times
         # 信号生成
-        signal_samples = generate_ofdm_signal_with_qpsk(params.bandwidth_hz, params.duration_s, params.sampling_rate_hz)
+        signal_samples = generate_ofdm_signal_with_qpsk(params.bandwidth_hz, params.duration_s, params.sampling_rate_hz, params.tx_power_dbm)
         
         # 信号配置
         start_sample = Int(ceil(signal_time * sampling_rate_hz / 1000)) + 1
@@ -203,15 +202,16 @@ end
 
 # ===== パスロス・シャドウイング・ノイズ付加 =====
 function add_path_loss_and_noise(tx_signal::Vector{ComplexF64}, path_loss_params::PathLossParameters, 
-                                noise_params::NoiseParameters, shadowing_params::ShadowingParameters, sampling_rate_hz::Float64)
+                                noise_params::NoiseParameters, shadowing_params::ShadowingParameters, sampling_rate_hz::Float64, 
+                                terminal_shadowing_db::Float64)
     N = length(tx_signal)
     
     # パスロス計算
     path_loss_db = calculate_path_loss(path_loss_params)
     path_loss_linear = 10^(-path_loss_db / 10)
     
-    # シャドウイング計算
-    shadowing_db = calculate_shadowing(shadowing_params, path_loss_params.distance_m, false)
+    # シャドウイング計算（端末の固定値を使用）
+    shadowing_db = terminal_shadowing_db
     shadowing_linear = 10^(-shadowing_db / 10)
     
     # 総損失を適用
@@ -241,7 +241,7 @@ function add_path_loss_and_noise(tx_signal::Vector{ComplexF64}, path_loss_params
     println("受信側パスロス・シャドウイング・AWGNパラメータ:")
     println("• 距離: $(round(path_loss_params.distance_m, digits=2)) m")
     println("• パスロス: $(round(path_loss_db, digits=2)) dB")
-    println("• シャドウイング: $(round(shadowing_db, digits=2)) dB")
+    println("• シャドウイング: $(round(shadowing_db, digits=2)) dB（端末固定値）")
     println("• 総損失: $(round(path_loss_db + shadowing_db, digits=2)) dB")
     println("• 受信信号電力（ノイズなし）: $(round(signal_power_dbm, digits=2)) dBm")
     println("• 受信信号電力（ノイズあり）: $(round(rx_power_dbm, digits=2)) dBm")
@@ -256,7 +256,57 @@ end
 function deploy_terminals(deployment_params::TerminalDeploymentParameters, shadowing_params::ShadowingParameters, tx_power_dbm::Float64)
     terminals = TerminalInfo[]
     
-    if deployment_params.deployment_mode == "fixed"
+    if deployment_params.deployment_mode == "poisson"
+        # ポアソン点過程モード（ランダム配置）
+        lambda = deployment_params.lambda
+        area_size = deployment_params.area_size_m
+        num_points = rand(Poisson(lambda * area_size^2))
+        println("ポアソン点過程モード: 密度$(lambda)点/m², 生成点数$(num_points)")
+        
+        for i in 1:num_points
+            # 円内のランダムな位置を生成（面積均等分布）
+            r_max = deployment_params.max_distance_m
+            r_min = deployment_params.min_distance_m
+            
+            # 面積均等分布のための距離生成
+            r = sqrt(r_min^2 + (r_max^2 - r_min^2) * rand())
+            theta = 2 * π * rand()  # 0から2πのランダムな角度
+            
+            # 直交座標に変換
+            x = r * cos(theta)
+            y = r * sin(theta)
+            distance = sqrt(x^2 + y^2)
+            
+            # 距離制限をチェック
+            if distance >= deployment_params.min_distance_m && distance <= deployment_params.max_distance_m
+                # パスロス計算
+                path_loss_params = PathLossParameters(
+                    distance, deployment_params.frequency_hz, deployment_params.path_loss_exponent,
+                    deployment_params.reference_distance_m, deployment_params.reference_path_loss_db
+                )
+                path_loss_db = calculate_path_loss(path_loss_params)
+                
+                # シャドウイング計算
+                shadowing_db = calculate_shadowing(shadowing_params, distance, false)
+                
+                # 総損失
+                total_loss_db = path_loss_db + shadowing_db
+                
+                # 受信電力計算
+                rx_power_dbm = tx_power_dbm - total_loss_db
+                
+                terminal = TerminalInfo(x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+                push!(terminals, terminal)
+                
+                println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")
+                println("  - パスロス: $(round(path_loss_db, digits=2)) dB")
+                println("  - シャドウイング: $(round(shadowing_db, digits=2)) dB")
+                println("  - 総損失: $(round(total_loss_db, digits=2)) dB")
+                println("  - 受信電力: $(round(rx_power_dbm, digits=1)) dBm")
+            end
+        end
+        
+    elseif deployment_params.deployment_mode == "fixed"
         # 固定端末数モード
         println("固定端末数モード: 端末数$(deployment_params.num_terminals)（固定位置配置）")
         
@@ -296,9 +346,9 @@ function deploy_terminals(deployment_params::TerminalDeploymentParameters, shado
             push!(terminals, terminal)
             
             println("• 端末$(i): 位置($(x), $(y)) m, 距離$(round(distance, digits=1)) m")
-            println("  - パスロス: $(round(path_loss_db, digits=1)) dB")
-            println("  - シャドウイング: $(round(shadowing_db, digits=1)) dB")
-            println("  - 総損失: $(round(total_loss_db, digits=1)) dB")
+            println("  - パスロス: $(round(path_loss_db, digits=2)) dB")
+            println("  - シャドウイング: $(round(shadowing_db, digits=2)) dB")
+            println("  - 総損失: $(round(total_loss_db, digits=2)) dB")
             println("  - 受信電力: $(round(rx_power_dbm, digits=1)) dBm")
         end
     end
@@ -376,7 +426,7 @@ function save_received_power_to_csv(time_axis::Vector{Float64}, rx_power::Vector
     params_data = DataFrame(
         parameter = [
             "signal_duration_us", "center_frequency_ghz", "signal_bandwidth_mhz", "terminal_bandwidth_mhz",
-            "tx_sampling_rate_mhz", "rx_sampling_rate_mhz", "tx_power_dbm", "snr_db",
+            "tx_sampling_rate_mhz", "rx_sampling_rate_mhz", "tx_power_dbm", "noise_power_dbm",
             "shadowing_enabled", "shadowing_std_db", "deployment_mode", "num_terminals",
             "area_size_m", "min_distance_m", "max_distance_m", "path_loss_exponent",
             "reference_distance_m", "reference_path_loss_db", "signal_interval_ms",
@@ -384,33 +434,32 @@ function save_received_power_to_csv(time_axis::Vector{Float64}, rx_power::Vector
         ],
         value = [
             params.duration_s * 1e6, params.center_frequency_hz / 1e9, params.bandwidth_hz / 1e6, 0.01,
-            16.0, 0.02, params.tx_power_dbm, noise_params.snr_db,
+            16.0, 0.02, params.tx_power_dbm, noise_params.noise_power_dbm,
             shadowing_params.enabled, shadowing_params.std_db, "fixed", length(terminals),
             100.0, 10.0, 500.0, 3.0, 1.0, 0.0, 20.0, 110.0, -130.0, detection_rate
         ]
     )
-    CSV.write("$(output_dir)/sync_simulation_parameters_$(timestamp).csv", params_data)
+    CSV.write("$(output_dir)/QPSK_simulation_parameters_$(timestamp).csv", params_data)
 end
 
 # ===== シミュレーションパラメータ作成 =====
 function create_simulation_parameters()
     return SimulationParameters(
         # 信号パラメータ
-        142.8,              # 信号持続時間（μs）
+        66.67,              # 信号持続時間（μs）
         4.7,                # 中心周波数（GHz）
-        1.0,                # 同期信号帯域幅（MHz）- 広帯域信号
-        0.01,                # 端末受信帯域幅（MHz）- 狭帯域受信
-        2.0,                # 送信側サンプリングレート（MHz）- 同期信号帯域幅の16倍
-        0.02,                # 受信側サンプリングレート（MHz）- 端末受信帯域幅の2倍
-        20.0,               # 送信電力（dBm）
+        3.6,                # 同期信号帯域幅（MHz）- 広帯域信号
+        0.125,                # 端末受信帯域幅（MHz）- より現実的な帯域
+        7.68,                # 送信側サンプリングレート（MHz）- 同期信号帯域幅の16倍
+        0.25,                # 受信側サンプリングレート（MHz）- 端末受信帯域幅の2倍
+        43.0,               # 送信電力（dBm）
         
         # 受信環境パラメータ
-        0.0,                # SNR（dB）
         true,               # シャドウイング有効/無効
         8.0,                # シャドウイング標準偏差（dB）
         
         # 端末配置パラメータ
-        "fixed",            # 配置モード
+        "fixed",          # 配置モード（ランダム配置）
         1,                  # 端末数
         100.0,              # エリアサイズ（m）
         10.0,               # 最小距離（m）
@@ -422,13 +471,13 @@ function create_simulation_parameters()
         # シミュレーション制御パラメータ
         20.0,               # 信号間隔（ms）
         110.0,              # 総持続時間（ms）
-        -130.0              # ピーク検出閾値（dBm）
+        -100.0              # ピーク検出閾値（dBm）
     )
 end
 
 # ===== リサンプリング対応版メイン実行関数 =====
 function main_resampling()
-    Random.seed!(1234)
+    #Random.seed!(1234)
     
     println("="^60)
     title_str = "同期信号受信シミュレーション（リサンプリング対応版）"
@@ -444,12 +493,47 @@ function main_resampling()
     println("• 送信側サンプリングレート: $(sim_params.tx_sampling_rate_mhz) MHz (高レート)")
     println("• 受信側サンプリングレート: $(sim_params.rx_sampling_rate_mhz) MHz (低レート)")
     println()
+    
+    # ===== サブキャリア間隔の算出 =====
+    println("=== サブキャリア間隔の算出 ===")
+    
+    # 送信側のサブキャリア間隔
+    tx_sampling_rate_hz = sim_params.tx_sampling_rate_mhz * 1e6
+    signal_duration_s = sim_params.signal_duration_us * 1e-6
+    tx_fft_size = Int(ceil(signal_duration_s * tx_sampling_rate_hz))
+    tx_scs_hz = tx_sampling_rate_hz / tx_fft_size
+    tx_scs_khz = tx_scs_hz / 1e3
+    
+    # 受信側のサブキャリア間隔
+    rx_sampling_rate_hz = sim_params.rx_sampling_rate_mhz * 1e6
+    rx_fft_size = Int(ceil(signal_duration_s * rx_sampling_rate_hz))
+    rx_scs_hz = rx_sampling_rate_hz / rx_fft_size
+    rx_scs_khz = rx_scs_hz / 1e3
+    
+    println("送信側:")
+    println("• FFTサイズ: $(tx_fft_size)")
+    println("• サブキャリア間隔: $(round(tx_scs_hz, digits=2)) Hz")
+    println("• サブキャリア間隔: $(round(tx_scs_khz, digits=2)) kHz")
+    println()
+    
+    println("受信側:")
+    println("• FFTサイズ: $(rx_fft_size)")
+    println("• サブキャリア間隔: $(round(rx_scs_hz, digits=2)) Hz")
+    println("• サブキャリア間隔: $(round(rx_scs_khz, digits=2)) kHz")
+    println()
+    
+    # 5G NR標準との比較
+    println("5G NR標準との比較:")
+    println("• 5G NR 120kHz SCS: 120.0 kHz")
+    println("• 送信側SCS: $(round(tx_scs_khz, digits=2)) kHz (差: $(round(tx_scs_khz - 120, digits=2)) kHz)")
+    println("• 受信側SCS: $(round(rx_scs_khz, digits=2)) kHz (差: $(round(rx_scs_khz - 120, digits=2)) kHz)")
+    println()
 
     # ノイズパラメータ設定（端末受信帯域幅を使用）
     noise_figure_db = 5.0
     terminal_bandwidth_hz = sim_params.terminal_bandwidth_mhz * 1e6  # MHz → Hz
     fixed_noise_power_dbm = -174 + 10 * log10(terminal_bandwidth_hz) + noise_figure_db
-    noise_params = NoiseParameters(fixed_noise_power_dbm, sim_params.snr_db)
+    noise_params = NoiseParameters(fixed_noise_power_dbm)
     
     # 端末配置パラメータ設定
     deployment_params = TerminalDeploymentParameters(
@@ -504,21 +588,23 @@ function main_resampling()
     println("受信側：ダウンサンプリングを実行中...")
     rate_ratio = sim_params.rx_sampling_rate_mhz / sim_params.tx_sampling_rate_mhz # レート比を計算 (例: 0.02 / 16.0)
     
-    # ダウンサンプリング実行
+    # ダウンサンプリング実行（resample関数が自動的にアンチエイリアシングフィルタを適用）
     tx_signal_low_rate = resample(tx_signal_high_rate, rate_ratio)
     
-    println("ダウンサンプリング後の低レート信号のサンプル数: $(length(tx_signal_low_rate))")
+    println("ダウンサンプリング後の信号のサンプル数: $(length(tx_signal_low_rate))")
+    println("端末受信帯域幅: $(sim_params.terminal_bandwidth_mhz) MHz")
+    println("注意: resample関数が自動的に帯域制限フィルタを適用済み")
     println()
 
-    # ===== 5. 低いレートの信号に対してノイズ付加と各種処理を行う =====
+    # ===== 5. ダウンサンプリング後の信号に対してノイズ付加と各種処理を行う =====
     # 時間軸も受信側のレートに合わせて再計算
     time_axis_rx = collect((0:length(tx_signal_low_rate)-1) / (sim_params.rx_sampling_rate_mhz * 1e6) * 1000) # ms単位
 
     # 代表端末での受信シミュレーション
     println("代表端末での受信シミュレーション中...")
     
-    # 代表端末のパスロスパラメータを作成
-    representative_terminal = terminals[1]  # 最初の端末を代表とする
+    # 代表端末のパスロスパラメータを作成（最も近い端末を選択）
+    representative_terminal = terminals[argmin([t.distance_m for t in terminals])]
     representative_path_loss_params = PathLossParameters(
         representative_terminal.distance_m,
         sim_params.center_frequency_ghz * 1e9,  # frequency_hz
@@ -528,9 +614,10 @@ function main_resampling()
     )
     
     println("受信側：パスロス、シャドウイング、ノイズを付加中...")
-    # ★ 低レートの信号に対してノイズを付加
+    # ★ ダウンサンプリング後の信号に対してノイズを付加（端末の固定シャドウイング値を使用）
     rx_signal, actual_snr_db, path_loss_db = add_path_loss_and_noise(
-        tx_signal_low_rate, representative_path_loss_params, noise_params, shadowing_params, sim_params.rx_sampling_rate_mhz * 1e6
+        tx_signal_low_rate, representative_path_loss_params, noise_params, shadowing_params, sim_params.rx_sampling_rate_mhz * 1e6, 
+        representative_terminal.shadowing_db
     )
     
     rx_power = abs2.(rx_signal)
@@ -541,7 +628,7 @@ function main_resampling()
     )
     
     # 出力ディレクトリを作成
-    output_dir = "results_sync_simulation_resampling"
+    output_dir = "results_QPSK_simulation_resampling"
     mkpath(output_dir)
     
     # 実行時刻を取得
@@ -557,7 +644,7 @@ function main_resampling()
                               signal_count, detection_rate, output_dir, shadowing_params)
     println("CSVファイルを '$(output_dir)' に保存しました。")
     println("• received_power_data_$(execution_timestamp).csv - 受信電力データ（mW, dBm）")
-    println("• sync_simulation_parameters_$(execution_timestamp).csv - パラメータ情報")
+    println("• QPSK_simulation_parameters_$(execution_timestamp).csv - パラメータ情報")
     println()
     
     println("="^60)
