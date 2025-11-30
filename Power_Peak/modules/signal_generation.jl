@@ -63,7 +63,7 @@ function generate_periodic_sync_signals(params::SignalParameters, interval_ms::F
     
     # 信号送信タイミングを計算
     signal_times = Float64[]
-    start_delay_ms = 10.0  # 開始遅延（ms）
+    start_delay_ms = rand() * 20.0  # 開始遅延（ms）
     current_time = start_delay_ms
     while current_time + signal_duration_ms <= total_duration_ms
         push!(signal_times, current_time)

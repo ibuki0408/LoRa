@@ -81,7 +81,7 @@ function test_shadowing()
     # パラメータ設定
     shadowing_params = ShadowingParameters(
         true,               # シャドウイング有効
-        8.0,                # 標準偏差（dB）
+        0.0,                # 標準偏差（dB）
         50.0,               # 相関距離（m）
         0.5                 # 相関係数
     )

@@ -36,20 +36,28 @@ function generate_snr_noise(signal_power_dbm::Float64, snr_db::Float64, num_samp
     return noise, noise_power_dbm
 end
 
-# ===== ノイズ統計分析 =====
+# ===== ノイズ統計分析（修正版） =====
 function analyze_noise_statistics(noise::Vector{ComplexF64})
-    noise_power = abs2.(noise)
-    noise_power_dbm = 10 * log10.(noise_power * 1000)
+    # リニア電力（W）を計算
+    noise_power_linear = abs2.(noise)
     
-    mean_power_dbm = mean(noise_power_dbm)
-    std_power_dbm = std(noise_power_dbm)
+    # ★修正点：先にリニア値で平均を計算する★
+    mean_power_linear = mean(noise_power_linear)
+    
+    # 平均電力をdBmに変換
+    mean_power_dbm = 10 * log10(mean_power_linear * 1000)
+    
+    # (参考) 各サンプルの瞬時電力（dBm）の統計
+    # こちらは変動の様子を見るためのもの
+    noise_power_dbm_instantaneous = 10 * log10.(noise_power_linear * 1000)
+    std_power_dbm = std(noise_power_dbm_instantaneous)
     
     println("ノイズ統計分析:")
     println("• サンプル数: $(length(noise))")
-    println("• 平均電力: $(round(mean_power_dbm, digits=2)) dBm")
-    println("• 標準偏差: $(round(std_power_dbm, digits=2)) dB")
-    println("• 最小電力: $(round(minimum(noise_power_dbm), digits=2)) dBm")
-    println("• 最大電力: $(round(maximum(noise_power_dbm), digits=2)) dBm")
+    println("• 平均電力 (リニア平均): $(round(mean_power_dbm, digits=2)) dBm  <- これが正しい平均電力")
+    println("• 瞬時電力の標準偏差: $(round(std_power_dbm, digits=2)) dB")
+    println("• 瞬時電力の最小: $(round(minimum(noise_power_dbm_instantaneous), digits=2)) dBm")
+    println("• 瞬時電力の最大: $(round(maximum(noise_power_dbm_instantaneous), digits=2)) dBm")
     
     return mean_power_dbm, std_power_dbm
 end

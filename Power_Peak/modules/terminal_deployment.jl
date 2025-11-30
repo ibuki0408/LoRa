@@ -4,6 +4,7 @@ using Random, Statistics, Distributions
 
 # ===== 端末情報 =====
 struct TerminalInfo
+    terminal_id::Int        # 端末ID
     x_m::Float64            # X座標（m）
     y_m::Float64            # Y座標（m）
     distance_m::Float64     # 基地局からの距離（m）
@@ -86,7 +87,7 @@ function deploy_terminals_poisson(deployment_params::TerminalDeploymentParameter
             # 受信電力計算
             rx_power_dbm = tx_power_dbm - total_loss_db
             
-            terminal = TerminalInfo(x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+            terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
             push!(terminals, terminal)
             
             println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")
@@ -139,7 +140,7 @@ function deploy_terminals_fixed(deployment_params::TerminalDeploymentParameters,
         # 受信電力計算
         rx_power_dbm = tx_power_dbm - total_loss_db
         
-        terminal = TerminalInfo(x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
         push!(terminals, terminal)
         
         println("• 端末$(i): 位置($(x), $(y)) m, 距離$(round(distance, digits=1)) m")
@@ -152,6 +153,100 @@ function deploy_terminals_fixed(deployment_params::TerminalDeploymentParameters,
     return terminals
 end
 
+# ===== 固定数均等配置 =====
+function deploy_terminals_uniform(deployment_params::TerminalDeploymentParameters, 
+                                 shadowing_std_db::Float64, shadowing_enabled::Bool, tx_power_dbm::Float64)
+    terminals = TerminalInfo[]
+    
+    # 固定数均等配置モード
+    num_terminals = deployment_params.num_terminals
+    max_distance = min(deployment_params.max_distance_m, deployment_params.area_size_m / 2)
+    
+    println("固定数均等配置モード: 端末数$(num_terminals)（面積均等配置）")
+    
+    # 円周上に均等配置
+    for i in 1:num_terminals
+        angle = 2π * (i - 1) / num_terminals  # 均等な角度
+        distance = max_distance * 0.8  # 最大距離の80%の位置
+        x = distance * cos(angle)
+        y = distance * sin(angle)
+        
+        # パスロス計算
+        path_loss_db = calculate_path_loss_simple(
+            distance, deployment_params.path_loss_exponent,
+            deployment_params.reference_distance_m, deployment_params.reference_path_loss_db
+        )
+        
+        # シャドウイング計算
+        shadowing_db = calculate_shadowing_simple(shadowing_std_db, shadowing_enabled)
+        
+        # 総損失
+        total_loss_db = path_loss_db + shadowing_db
+        
+        # 受信電力計算
+        rx_power_dbm = tx_power_dbm - total_loss_db
+        
+        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+        push!(terminals, terminal)
+        
+        println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")
+        println("  - パスロス: $(round(path_loss_db, digits=2)) dB")
+        println("  - シャドウイング: $(round(shadowing_db, digits=2)) dB")
+        println("  - 総損失: $(round(total_loss_db, digits=2)) dB")
+        println("  - 受信電力: $(round(rx_power_dbm, digits=1)) dBm")
+    end
+    
+    return terminals
+end
+
+# ===== 固定数ランダム配置（面積均等・ポアソン風、個数固定） =====
+function deploy_terminals_random_fixed(deployment_params::TerminalDeploymentParameters,
+                                     shadowing_std_db::Float64, shadowing_enabled::Bool, tx_power_dbm::Float64)
+    terminals = TerminalInfo[]
+
+    num_terminals = deployment_params.num_terminals
+    r_min = deployment_params.min_distance_m
+    r_max = deployment_params.max_distance_m
+
+    println("固定数ランダム配置モード: 端末数$(num_terminals)（面積均等ランダム）")
+
+    for i in 1:num_terminals
+        # 面積均等（円環一様）に半径をサンプルし、角度は一様
+        r = sqrt(r_min^2 + (r_max^2 - r_min^2) * rand())
+        theta = 2 * π * rand()
+
+        x = r * cos(theta)
+        y = r * sin(theta)
+        distance = sqrt(x^2 + y^2)
+
+        # パスロス計算
+        path_loss_db = calculate_path_loss_simple(
+            distance, deployment_params.path_loss_exponent,
+            deployment_params.reference_distance_m, deployment_params.reference_path_loss_db
+        )
+
+        # シャドウイング計算
+        shadowing_db = calculate_shadowing_simple(shadowing_std_db, shadowing_enabled)
+
+        # 総損失
+        total_loss_db = path_loss_db + shadowing_db
+
+        # 受信電力計算
+        rx_power_dbm = tx_power_dbm - total_loss_db
+
+        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+        push!(terminals, terminal)
+
+        println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")
+        println("  - パスロス: $(round(path_loss_db, digits=2)) dB")
+        println("  - シャドウイング: $(round(shadowing_db, digits=2)) dB")
+        println("  - 総損失: $(round(total_loss_db, digits=2)) dB")
+        println("  - 受信電力: $(round(rx_power_dbm, digits=1)) dBm")
+    end
+
+    return terminals
+end
+
 # ===== 統合端末配置関数 =====
 function deploy_terminals(deployment_params::TerminalDeploymentParameters, 
                          shadowing_std_db::Float64, shadowing_enabled::Bool, tx_power_dbm::Float64)
@@ -159,6 +254,10 @@ function deploy_terminals(deployment_params::TerminalDeploymentParameters,
         return deploy_terminals_poisson(deployment_params, shadowing_std_db, shadowing_enabled, tx_power_dbm)
     elseif deployment_params.deployment_mode == "fixed"
         return deploy_terminals_fixed(deployment_params, shadowing_std_db, shadowing_enabled, tx_power_dbm)
+    elseif deployment_params.deployment_mode == "uniform"
+        return deploy_terminals_uniform(deployment_params, shadowing_std_db, shadowing_enabled, tx_power_dbm)
+    elseif deployment_params.deployment_mode == "random_fixed"
+        return deploy_terminals_random_fixed(deployment_params, shadowing_std_db, shadowing_enabled, tx_power_dbm)
     else
         error("Unknown deployment mode: $(deployment_params.deployment_mode)")
     end
