@@ -237,11 +237,11 @@ function deploy_terminals_random_fixed(deployment_params::TerminalDeploymentPara
         terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
         push!(terminals, terminal)
 
-        println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")
-        println("  - パスロス: $(round(path_loss_db, digits=2)) dB")
-        println("  - シャドウイング: $(round(shadowing_db, digits=2)) dB")
-        println("  - 総損失: $(round(total_loss_db, digits=2)) dB")
-        println("  - 受信電力: $(round(rx_power_dbm, digits=1)) dBm")
+            # println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")
+            # println("  - パスロス: $(round(path_loss_db, digits=2)) dB")
+            # println("  - シャドウイング: $(round(shadowing_db, digits=2)) dB")
+            # println("  - 総損失: $(round(total_loss_db, digits=2)) dB")
+            # println("  - 受信電力: $(round(rx_power_dbm, digits=1)) dBm")
     end
 
     return terminals
