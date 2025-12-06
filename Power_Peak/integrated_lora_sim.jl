@@ -3,10 +3,9 @@ using Random, Statistics, Printf, DataFrames, CSV, Plots, Dates, LinearAlgebra, 
 # ==========================================
 # 1. 統合パラメータ構造体
 # ==========================================
-struct IntegratedParameters
-    # --- 信号・PHYパラメータ (main_simulation.jl 由来) ---
+mutable struct IntegratedParameters
+    # === 物理層 (PHY) ===
     signal_duration_us::Float64
-    # center_freq_ghz は削除 (sync_center_freq_ghz と data_center_freq_ghz に分離済み)
     signal_bw_mhz::Float64
     terminal_bw_mhz::Float64
     tx_sampling_rate_mhz::Float64
@@ -14,7 +13,7 @@ struct IntegratedParameters
     tx_power_dbm::Float64
     noise_figure_db::Float64
     
-    # --- ネットワーク・MACパラメータ (advance_lora_sim.jl 由来) ---
+    # === MAC層 ===
     num_terminals::Int
     area_size_m::Float64
     slot_length_ms::Float64
@@ -23,75 +22,101 @@ struct IntegratedParameters
     enable_carrier_sense::Bool
     cs_threshold_dbm::Float64
     
-    # --- 制御パラメータ ---
-    beacon_interval_ms::Float64
-    total_duration_ms::Float64
-    max_startup_delay_ms::Float64
+    # === LoRa固有 ===
+    spreading_factor::Int
+    lora_payload_bytes::Int
     
-    # --- 環境 ---
+    # === シミュレーション制御 ===
+    beacon_interval_ms::Float64
+    simulation_duration_ms::Float64
+    max_startup_delay_ms::Float64
+    duty_cycle::Float64
+    
+    # === 環境モデル ===
     shadowing_enabled::Bool
     shadowing_std_db::Float64
     pass_loss_exp::Float64
     
-    # --- Out-of-band 同期設定 ---
-    sync_center_freq_ghz::Float64      # 同期信号の中心周波数 (5G帯)
-    data_center_freq_ghz::Float64      # データ通信の中心周波数 (LoRa帯)
-    reference_path_loss_db::Float64    # 基準距離(1m)でのパスロス (dB)
+    # === Out-of-band同期 ===
+    sync_center_freq_ghz::Float64
+    data_center_freq_ghz::Float64
+    reference_path_loss_db::Float64
     
-    # --- 同期検出パラメータ ---
-    sync_observation_duration_ms::Float64  # 同期観察時間 (ms)
-    gw_tx_power_dbm::Float64           # ゲートウェイ送信電力 (dBm)
-    noise_floor_window_ms::Float64     # ノイズフロア推定窓 (ms)
-    detection_margin_db::Float64       # 検出マージン (dB)
-    min_samples::Int                   # 最小サンプル数
-    debounce_time_ms::Float64          # デバウンス時間 (ms)
-    initial_wait_ms::Float64           # 初期待機時間 (ms)
+    # === 同期検出 ===
+    sync_observation_duration_ms::Float64
+    gw_tx_power_dbm::Float64
+    noise_floor_window_ms::Float64
+    detection_margin_db::Float64
+    min_samples::Int
+    debounce_time_ms::Float64
+    initial_wait_ms::Float64
 end
 
 function create_integrated_params()
+    # ========================================
+    # パラメータ設定
+    # ========================================
+    
+    # --- キャリアセンス設定 ---
+    # true:  LBT有効（指数バックオフ、最大5回再試行）→ 衝突削減
+    # false: 純粋ALOHA（CS無効）→ 衝突発生
+    enable_cs = true
+    
+    # --- LoRa設定 (ToA計算に使用) ---
+    sf = 10
+    payload_bytes = 10
+    
+    # --- 周波数設定 ---
+    sync_freq_ghz = 3.7   # 5G同期信号
+    data_freq_ghz = 0.92  # LoRaデータ
+    
     return IntegratedParameters(
-        # --- PHY (LoRa風物理層パラメータ) ---
-        66.67,   # signal_duration_us: 信号長 (μs)
-        # 0.92,  # center_freq_ghz: 削除
-        3.6,     # signal_bw_mhz: 送信信号帯域幅 (MHz) - 広帯域
-        0.125,   # terminal_bw_mhz: 端末受信帯域幅 (MHz) - 125kHz
-        7.68,    # tx_sampling_rate_mhz: 送信サンプリングレート (MHz)
-        0.25,    # rx_sampling_rate_mhz: 受信サンプリングレート (MHz)
-        13.0,    # tx_power_dbm: 送信電力 (dBm)
-        6.0,     # noise_figure_db: 受信機雑音指数 (dB)
-
-        # --- MAC (ネットワーク・制御パラメータ) ---
-        2,      # num_terminals: 端末数
-        2000.0,  # area_size_m: エリアサイズ (m) - 500m
-        100.0,   # slot_length_ms: 1スロットの長さ (ms)
-        50.0,    # packet_airtime_ms: パケット送信時間 (ms)
-        0.1,     # transmission_prob: 送信確率 (各スロットで送信する確率)
-        true,    # enable_carrier_sense: キャリアセンス有効化 (true/false)
-        -120.0,  # cs_threshold_dbm: キャリアセンス閾値 (dBm)
-
-        # --- Control (シミュレーション制御) ---
-        20.0,    # beacon_interval_ms: 同期ビーコン間隔 (ms)
-        5000.0,  # total_duration_ms: シミュレーション総時間 (ms)
-        200.0,   # max_startup_delay_ms: 最大起動遅延 (ms) - ランダムな起動ズレ
-
-        # --- Env (環境パラメータ) ---
-        true,    # shadowing_enabled: シャドウイング有効化
-        0.0,     # shadowing_std_db: シャドウイング標準偏差 (dB)
-        2.0,     # pass_loss_exp: パスロス指数
+        # === 物理層 ===
+        66.67,    # signal_duration_us
+        3.6,      # signal_bw_mhz
+        0.125,    # terminal_bw_mhz
+        7.68,     # tx_sampling_rate_mhz
+        2.0,      # rx_sampling_rate_mhz
+        13.0,     # tx_power_dbm
+        6.0,      # noise_figure_db
         
-        # --- Out-of-band 同期設定 ---
-        0.92,     # sync_center_freq_ghz: 同期信号周波数 (GHz) - 5G n77/n78帯
-        0.92,    # data_center_freq_ghz: データ通信周波数 (GHz) - LoRa 920MHz帯
-        20*log10(0.92*1e9) - 147.55,     # reference_path_loss_db: 基準距離(1m)でのパスロス (Friis式: 20log(f) - 147.55)
+        # === MAC層 ===
+        50,        # num_terminals
+        500.0,    # area_size_m
+        400.0,    # slot_length_ms
+        0.0,      # packet_airtime_ms (自動計算)
+        0.1,      # transmission_prob
+        true,  # enable_carrier_sense (true: LBT有効, false: 純粋ALOHA)
+        -120.0,   # cs_threshold_dbm
         
-        # --- 同期検出パラメータ ---
-        500.0,   # sync_observation_duration_ms: 同期観察時間 (ms)
-        43.0,    # gw_tx_power_dbm: ゲートウェイ送信電力 (dBm) - 5G基地局相当
-        9.0,     # noise_floor_window_ms: ノイズフロア推定窓 (ms)
-        15.0,    # detection_margin_db: 検出マージン (dB)
-        2,       # min_samples: 最小サンプル数
-        1.0,     # debounce_time_ms: デバウンス時間 (ms)
-        110.0    # initial_wait_ms: 初期待機時間 (ms)
+        # === LoRa固有 ===
+        sf,
+        payload_bytes,
+        
+        # === シミュレーション制御 ===
+        20.0,  # beacon_interval_ms
+        600000.0, # simulation_duration_ms (10分)
+        200.0,    # max_startup_delay_ms
+        0.01,     # duty_cycle (1%)
+        
+        # === 環境モデル ===
+        true,     # shadowing_enabled
+        0.0,      # shadowing_std_db
+        2.5,      # pass_loss_exp
+        
+        # === Out-of-band同期 ===
+        sync_freq_ghz,
+        data_freq_ghz,
+        20*log10(sync_freq_ghz*1e9) - 147.55,  # reference_path_loss_db
+        
+        # === 同期検出 ===
+        500.0,    # sync_observation_duration_ms
+        43.0,     # gw_tx_power_dbm
+        9.0,      # noise_floor_window_ms
+        10.0,     # detection_margin_db
+        3,        # min_samples
+        1.0,      # debounce_time_ms
+        110.0     # initial_wait_ms
     )
 end
 
@@ -104,6 +129,8 @@ include("modules/shadowing.jl")
 include("modules/noise_generation.jl")
 include("modules/terminal_deployment.jl")
 include("modules/local_clock.jl")
+include("modules/lora_airtime.jl")
+include("modules/collision_detection.jl")
 
 # main_simulation.jl から重要な関数を再定義・統合
 # (依存関係を断ち切るため、必要なロジックをここに移植します)
@@ -294,7 +321,9 @@ function perform_hifi_synchronization(params::IntegratedParameters, terminals; o
     # 各端末で受信シミュレーション (5G帯の同期信号)
     for t in terminals
         # A. パスロス・ノイズ付加 (5G帯)
-        pl_p = PathLossParameters(t.distance_m, params.sync_center_freq_ghz*1e9, params.pass_loss_exp, 1.0, params.reference_path_loss_db)
+        # 5G帯の基準パスロスを計算 (Friis式)
+        ref_pl_5g = 20*log10(params.sync_center_freq_ghz*1e9) + 20*log10(1.0) - 147.55
+        pl_p = PathLossParameters(t.distance_m, params.sync_center_freq_ghz*1e9, params.pass_loss_exp, 1.0, ref_pl_5g)
         pl_db = calculate_path_loss(pl_p)
         total_loss_lin = 10^(-(pl_db + t.shadowing_db)/10)
         sig_rx = sig_tx_low * sqrt(total_loss_lin)
@@ -336,9 +365,9 @@ function perform_hifi_synchronization(params::IntegratedParameters, terminals; o
         # ★ 起動時刻をコンソール出力 ★
         println("  [Term $(t.terminal_id)] Startup Time: $(round(startup_ms, digits=4)) ms")
         
-        # 起動時刻以降で最初に見つかったビーコン (同期ポイントとして start_times を使用)
+        # 起動時刻以降で最初に見つかったビーコン (同期ポイントとして end_times を使用: 立ち下がり基準)
         # main_simulation.jl では start_times が補間された正確な上抜け時刻
-        valid_times = final_cross[:start_times]
+        valid_times = final_cross[:end_times]
         
         first_beacon_idx = findfirst(t -> t >= startup_ms, valid_times)
         
@@ -454,8 +483,21 @@ function run_integrated_simulation()
     
     params = create_integrated_params()
     
-    # 1. 端末配置 (5G帯でのパスロス計算に変更)
-    dep_p = TerminalDeploymentParameters("random_fixed", 0.0, params.num_terminals, params.area_size_m, 10.0, params.area_size_m/2, params.sync_center_freq_ghz*1e9, 3.0, 1.0, params.reference_path_loss_db)
+    # ★ LoRa パラメータから ToA を自動計算して設定 ★
+    lora_params = create_lora_params(params.spreading_factor, params.lora_payload_bytes)
+    params.packet_airtime_ms = calculate_lora_airtime(lora_params)
+    
+    println("\nLoRa 設定:")
+    println("  SF: $(params.spreading_factor)")
+    println("  ペイロード: $(params.lora_payload_bytes) bytes")
+    println("  計算された ToA: $(round(params.packet_airtime_ms, digits=2)) ms")
+    println("  スロット長: $(params.slot_length_ms) ms")
+    println()
+    
+    # 1. 端末配置 (5G帯でのパスロス計算)
+    # 5G帯の基準パスロスを計算
+    ref_pl_5g = 20*log10(params.sync_center_freq_ghz*1e9) + 20*log10(1.0) - 147.55
+    dep_p = TerminalDeploymentParameters("random_fixed", 0.0, params.num_terminals, params.area_size_m, 10.0, params.area_size_m/2, params.sync_center_freq_ghz*1e9, params.pass_loss_exp, 1.0, ref_pl_5g)
     terminals = deploy_terminals(dep_p, params.shadowing_std_db, params.shadowing_enabled, params.gw_tx_power_dbm)
     
     # 端末情報表示（5G帯のみ）
@@ -483,10 +525,11 @@ function run_integrated_simulation()
         start_ms = sync_results[t.terminal_id]
         if start_ms === nothing continue end # 同期失敗端末はスキップ
         
-        # シミュレーション終了までスロットを生成
-        curr_ms = start_ms
+        # ランダムな初期オフセットを追加（衝突を観察するため）
+        random_offset = rand() * params.slot_length_ms
+        curr_ms = start_ms + random_offset
         idx = 1
-        while curr_ms < params.total_duration_ms
+        while curr_ms < params.simulation_duration_ms
             push!(candidates, CandidateSlot(curr_ms, t, idx))
             curr_ms += params.slot_length_ms
             idx += 1
@@ -494,30 +537,61 @@ function run_integrated_simulation()
     end
     
     # ★ここが重要：時刻順にソート★
-    sort!(candidates, by = x -> x.time_global_ms)
+    # ★時刻順にソート (DES用スタックとして使うため、降順にして末尾からpopする)★
+    sort!(candidates, by = x -> x.time_global_ms, rev=true)
     println("   -> Total $(length(candidates)) slots scheduled.")
     
-    # 4. Phase 3: MAC層シミュレーション (CSMA/CA)
-    println("Phase 3: Running MAC Layer...")
+    # 4. Phase 3: MAC層実行 (Discrete Event Simulation)
+    println("Phase 3: Running MAC Layer (DES Mode)...")
+    
+    # ノイズフロア計算
+    noise_bw_hz = params.terminal_bw_mhz * 1e6
+    noise_power_dbm = -174 + 10*log10(noise_bw_hz) + params.noise_figure_db
     
     active_tx = TransmissionRecord[]
     finished_tx = TransmissionRecord[]
     
-    for cand in candidates
+    # 端末ごとの次回送信可能時刻 (Duty Cycle用)
+    next_available_time = Dict{Int, Float64}()
+    for t in terminals
+        next_available_time[t.terminal_id] = 0.0
+    end
+    
+    # メインループ (イベントキューが空になるまで)
+    while !isempty(candidates)
+        cand = pop!(candidates) # 末尾(最小時刻)を取得 (O(1))
+        
         curr_t = cand.time_global_ms
         me = cand.terminal_node
         
-        # A. 終わった通信を掃除
+        # A. 終わった通信を掃除 (curr_t 時点で終了しているもの)
+        # ※ active_tx には "現在進行中" または "未来に終了する" 送信が残る
         filter!(x -> x.end_ms > curr_t, active_tx)
         
-        # B. キャリアセンス (Advance_LoRa ロジック) - LoRa帯で判定
+        # B. Duty Cycle チェック
+        if curr_t < next_available_time[me.terminal_id]
+            continue
+        end
+        
+        # C. キャリアセンス (LBT)
         is_busy = false
         if params.enable_carrier_sense
+            # active_tx 内のすべての送信 (過去に開始し、現在まだ終わっていない) との干渉確認
             for other in active_tx
-                # 簡易RSSI計算 (LoRa帯)
+                # other.start_ms <= curr_t は常に真 (DESなので)
+                # other.end_ms > curr_t も filter済なので常に真
+                # よって、active_tx にあるものは全て「現在送信中」
+                
+                # 受信電力計算 for CS
                 dist = sqrt((me.x_m - other.x)^2 + (me.y_m - other.y)^2)
-                pl = 20*log10(dist) + 20*log10(params.data_center_freq_ghz*1e9) + params.reference_path_loss_db - 147.55
-                rssi = other.tx_power_dbm - pl # 簡易PathLoss
+                pl = params.reference_path_loss_db + 10 * params.pass_loss_exp * log10(dist)
+                
+                # Shadowing (簡易的)
+                if params.shadowing_enabled
+                    pl += randn() * params.shadowing_std_db
+                end
+                
+                rssi = other.tx_power_dbm - pl 
                 
                 if rssi > params.cs_threshold_dbm
                     is_busy = true
@@ -526,20 +600,47 @@ function run_integrated_simulation()
             end
         end
         
-        # C. 送信判定
+        # D. 送信判定
         if !is_busy
-            if rand() < params.transmission_prob
-                # 送信実行
-                dur = params.packet_airtime_ms
+            # 送信成功（チャネルアクセス取得）
+            dur = params.packet_airtime_ms
+            
+            # Duty Cycle 計算
+            off_period = dur * (1.0 / params.duty_cycle - 1.0)
+            next_available_time[me.terminal_id] = curr_t + dur + off_period
+            
+            # GWでの受信電力
+            dist_gw = sqrt(me.x_m^2 + me.y_m^2)
+            pl_gw = params.reference_path_loss_db + 10 * params.pass_loss_exp * log10(dist_gw)
+            if params.shadowing_enabled
+                pl_gw += randn() * params.shadowing_std_db
+            end
+            rx_gw = params.tx_power_dbm - pl_gw
+            
+            rec = TransmissionRecord(me.terminal_id, curr_t, curr_t+dur, params.tx_power_dbm, me.x_m, me.y_m, "Success", rx_gw)
+            push!(active_tx, rec)
+            push!(finished_tx, rec)
+            
+        else
+            # ビジー検出 → バックオフして再スケジュール
+            # 指数バックオフなどのロジックを入れる場合、新しい時刻で再挿入する
+            
+            # 簡易実装: 10～100ms ランダムバックオフ
+            backoff_ms = 10.0 + rand() * 90.0
+            new_time = curr_t + backoff_ms
+            
+            if new_time < params.simulation_duration_ms
+                # 新しいイベントを作成
+                # SlotIndexは変わらないが時刻が変わる
+                new_cand = CandidateSlot(new_time, me, cand.slot_index)
                 
-                # GWでの受信電力 (判定用) - LoRa帯
-                dist_gw = sqrt(me.x_m^2 + me.y_m^2)
-                pl_gw = 20*log10(dist_gw) + 20*log10(params.data_center_freq_ghz*1e9) + params.reference_path_loss_db - 147.55
-                rx_gw = params.tx_power_dbm - pl_gw
-                
-                rec = TransmissionRecord(me.terminal_id, curr_t, curr_t+dur, params.tx_power_dbm, me.x_m, me.y_m, "Success", rx_gw)
-                push!(active_tx, rec)
-                push!(finished_tx, rec)
+                # スタックに挿入 (降順を維持)
+                # searchsortedfirst(A, x, rev=true) は A[i] <= x となる最初の場所を返す
+                # つまり x より大きい要素の後ろ、x 以下の要素の前
+                # [500, 400, 300]. insert 350. sorted logic returns index 3 (value 300).
+                # insert at 3 -> [500, 400, 350, 300]. Correct.
+                idx = searchsortedfirst(candidates, new_cand, by=x->x.time_global_ms, rev=true)
+                insert!(candidates, idx, new_cand)
             end
         end
     end
@@ -547,41 +648,19 @@ function run_integrated_simulation()
     # 5. Phase 4: 結果解析 (衝突判定)
     println("Phase 4: Analyzing Results...")
     
-    collisions = 0
-    success = 0
-    
-    # 簡易衝突判定 (時間重複 & 電力差なし)
-    for i in 1:length(finished_tx)
-        p1 = finished_tx[i]
-        is_collided = false
-        
-        for j in 1:length(finished_tx)
-            if i == j continue end
-            p2 = finished_tx[j]
-            
-            # 時間重複
-            if max(p1.start_ms, p2.start_ms) < min(p1.end_ms, p2.end_ms)
-                # Capture Effect (6dB)
-                if p1.rx_power_at_gw < p2.rx_power_at_gw + 6.0
-                    is_collided = true # 負けた、または引き分け
-                end
-            end
-        end
-        
-        if is_collided
-            p1.status = "Collision"
-            collisions += 1
-        else
-            success += 1
-        end
-    end
+    # SINR ベースの衝突判定（モジュール化）
+    (success, collisions) = detect_collisions_sinr(finished_tx, params.spreading_factor, noise_power_dbm)
     
     println("-"^30)
     println("Result Summary:")
     println("  Total Packets: $(length(finished_tx))")
     println("  Success:       $success")
     println("  Collisions:    $collisions")
-    println("  PER:           $(round(collisions/length(finished_tx)*100, digits=2)) %")
+    if !isempty(finished_tx)
+        println("  PER:           $(round(collisions/length(finished_tx)*100, digits=2)) %")
+    else
+        println("  PER:           N/A")
+    end
     println("-"^30)
 
     # ★ 送信結果のCSV保存 ★
