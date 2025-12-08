@@ -1,28 +1,36 @@
 # ============================================================
-# PER vs Terminal Count Evaluation Script
-# 複数回実行による統計的評価
+# PER vs Terminal Count Evaluation Script (Optimized)
+# 並列実行による高速化版
 # ============================================================
 
+using Distributed
 using Statistics
 using Random
 using Dates
 using Printf
 
-# シミュレーション本体を読み込み
-include("simulation_wrapper.jl")
+# 並列ワーカーの追加（CPUコア数に応じて自動調整）
+if nprocs() == 1
+    num_workers = min(Sys.CPU_THREADS, 8)  # 最大8ワーカー
+    addprocs(num_workers)
+    println("Added $num_workers worker processes")
+end
+
+# 全ワーカーでシミュレーションを読み込み
+@everywhere include("simulation_wrapper_fast.jl")
 
 # ============================================================
 # 評価パラメータ
 # ============================================================
 
 # 端末数の範囲
-TERMINAL_COUNTS = [10, 20, 30, 40, 50, 75, 100]
+TERMINAL_COUNTS = [10, 20, 30, 40, 50]
 
 # 各設定での実行回数
 NUM_RUNS = 30
 
 # チャネル数の比較
-CHANNEL_CONFIGS = [1,8]  # 1チャネル vs 8チャネル
+CHANNEL_CONFIGS = [1, 8]  # 1チャネル vs 8チャネル
 
 # ============================================================
 # 結果保存用構造体
@@ -39,15 +47,15 @@ struct EvaluationResult
 end
 
 # ============================================================
-# シミュレーション実行関数
+# 並列シミュレーション実行関数
 # ============================================================
 
-function run_single_simulation(num_terminals::Int, num_channels::Int, seed::Int)
+@everywhere function run_single_simulation_worker(num_terminals::Int, num_channels::Int, seed::Int)
     try
-        # ラッパー関数を呼び出し
-        results = run_simulation_with_params(num_terminals, num_channels, seed)
+        # 最適化ラッパー関数を呼び出し
+        results = run_simulation_with_params_fast(num_terminals, num_channels, seed)
         
-        return EvaluationResult(
+        return (
             num_terminals,
             num_channels,
             seed,
@@ -91,13 +99,14 @@ function calculate_statistics(results::Vector{EvaluationResult})
 end
 
 # ============================================================
-# メイン評価ループ
+# メイン評価ループ（並列実行版）
 # ============================================================
 
 function run_evaluation()
     println("="^60)
-    println("   PER vs Terminal Count Evaluation")
+    println("   PER vs Terminal Count Evaluation (Parallel)")
     println("   Multiple Runs: $NUM_RUNS per configuration")
+    println("   Workers: $(nprocs()-1)")
     println("="^60)
     println()
     
@@ -110,23 +119,22 @@ function run_evaluation()
         
         for num_terminals in TERMINAL_COUNTS
             println("\nTerminals: $num_terminals")
-            print("  Running: ")
+            print("  Running $NUM_RUNS simulations in parallel... ")
+            flush(stdout)
             
-            config_results = EvaluationResult[]
+            start_time = time()
             
-            for run in 1:NUM_RUNS
-                # 進捗表示
-                if run % 5 == 0
-                    print("$run ")
-                end
-                
-                # シミュレーション実行
-                result = run_single_simulation(num_terminals, num_channels, run)
-                push!(config_results, result)
-                push!(all_results, result)
-            end
+            # 並列実行
+            tasks = [(num_terminals, num_channels, run) for run in 1:NUM_RUNS]
+            raw_results = pmap(t -> run_single_simulation_worker(t...), tasks)
             
-            println("✓")
+            elapsed = time() - start_time
+            
+            # 結果を構造体に変換
+            config_results = [EvaluationResult(r...) for r in raw_results]
+            append!(all_results, config_results)
+            
+            println("✓ ($(round(elapsed, digits=1))s)")
             
             # 統計処理
             stats = calculate_statistics(config_results)
@@ -136,6 +144,7 @@ function run_evaluation()
             @printf("    Std Dev:   %.2f %%\n", stats.std)
             @printf("    Range:     [%.2f, %.2f] %%\n", stats.min, stats.max)
             @printf("    Median:    %.2f %%\n", stats.median)
+            @printf("    Throughput: %.1f sims/sec\n", NUM_RUNS / elapsed)
         end
     end
     

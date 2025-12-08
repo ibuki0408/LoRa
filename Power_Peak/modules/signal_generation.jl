@@ -101,7 +101,8 @@ function generate_periodic_sync_signals(params::SignalParameters, interval_ms::F
     println("• 送信電力: $(params.tx_power_dbm) dBm")
     println()
     
-    return time_axis, tx_signal, signal_count
+    # Return ideal beacon times (center of each transmission) for accuracy analysis
+    return time_axis, tx_signal, signal_count, signal_times
 end
 
 # ===== 信号生成のテスト関数 =====
@@ -118,7 +119,7 @@ function test_signal_generation()
     )
     
     # 信号生成
-    time_axis, tx_signal, signal_count = generate_periodic_sync_signals(params, 20.0, 110.0)
+    time_axis, tx_signal, signal_count, ideal_beacon_times = generate_periodic_sync_signals(params, 20.0, 110.0)
     
     println("生成された信号:")
     println("• サンプル数: $(length(tx_signal))")

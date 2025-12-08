@@ -64,7 +64,7 @@ function create_csma_params()
         # LoRa
         sf,
         payload_bytes,
-        1,        # num_channels (AS923 Japan typical (1-16))
+        8,        # num_channels (AS923 Japan typical (1-16))
         
         # Simulation
         600000.0, # simulation_duration_ms (10分)

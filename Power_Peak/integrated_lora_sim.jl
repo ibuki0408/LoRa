@@ -30,7 +30,8 @@ mutable struct IntegratedParameters
     # === シミュレーション制御 ===
     beacon_interval_ms::Float64
     simulation_duration_ms::Float64
-    max_startup_delay_ms::Float64
+    max_startup_delay_ms::Float64  # 起動時刻の上限（キャップ）
+    mean_startup_delay_ms::Float64 # 起動時刻の平均（ポアソン分布）
     duty_cycle::Float64
     mean_event_interval_ms::Float64 # ポアソン分布の平均送信間隔
     
@@ -84,7 +85,7 @@ function create_integrated_params()
         
         # === MAC層 ===
         50,        # num_terminals
-        500.0,    # area_size_m
+        1000.0,    # area_size_m
         400.0,    # slot_length_ms
         0.0,      # packet_airtime_ms (自動計算)
         0.1,      # transmission_prob
@@ -94,12 +95,13 @@ function create_integrated_params()
         # === LoRa固有パラメータ ===
         sf,
         payload_bytes,
-        1,        # num_channels (AS923 Japan typical (1-16))
+        8,        # num_channels (AS923 Japan typical (1-16))
         
         # === シミュレーション制御 ===
-        20.0,  # beacon_interval_ms
+        20.0,     # beacon_interval_ms
         600000.0, # simulation_duration_ms (10分)
-        200.0,    # max_startup_delay_ms
+        30000.0,  # max_startup_delay_ms (最大30秒)
+        15000.0,  # mean_startup_delay_ms (平均15秒、ポアソン分布)
         0.01,     # duty_cycle (1%)
         60000.0,  # mean_event_interval_ms (平均60秒間隔 = 少し余裕を持たせる)
         
@@ -114,7 +116,7 @@ function create_integrated_params()
         20*log10(sync_freq_ghz*1e9) - 147.55,  # reference_path_loss_db
         
         # === 同期検出 ===
-        500.0,    # sync_observation_duration_ms
+        35000.0,  # sync_observation_duration_ms (最大起動時刻30s + マージン5s)
         43.0,     # gw_tx_power_dbm
         9.0,      # noise_floor_window_ms
         10.0,     # detection_margin_db
@@ -304,7 +306,7 @@ function perform_hifi_synchronization(params::IntegratedParameters, terminals; o
     
     # 同期用の信号を生成（観察時間はパラメータで指定）
     sync_duration_ms = params.sync_observation_duration_ms
-    time_tx, sig_tx_high, _ = generate_periodic_sync_signals(sig_params, params.beacon_interval_ms, sync_duration_ms)
+    time_tx, sig_tx_high, _, ideal_beacon_times = generate_periodic_sync_signals(sig_params, params.beacon_interval_ms, sync_duration_ms)
     
     # 2. ダウンサンプリング
     ratio = params.rx_sampling_rate_mhz / params.tx_sampling_rate_mhz
@@ -320,7 +322,10 @@ function perform_hifi_synchronization(params::IntegratedParameters, terminals; o
         distance_m = Float64[],
         rx_power_dbm = Float64[],
         detected_time_ms = Union{Float64, Missing}[],
-        slot_start_ms = Union{Float64, Missing}[]
+        slot_start_ms = Union{Float64, Missing}[],
+        ideal_beacon_time_ms = Union{Float64, Missing}[],
+        sync_error_ms = Union{Float64, Missing}[],
+        snr_db = Union{Float64, Missing}[]
     )
 
     # ノイズパラメータ
@@ -371,7 +376,10 @@ function perform_hifi_synchronization(params::IntegratedParameters, terminals; o
         final_cross = debounce_integrated(crossings_filtered, params.debounce_time_ms)
         
         # C. 起動遅延を考慮して、最初に掴むべきビーコンを決定
-        startup_ms = rand() * params.max_startup_delay_ms
+        # ポアソン分布（指数分布）に従った起動時刻を生成
+        # より現実的なIoTデバイスの起動シナリオをシミュレート
+        startup_ms = -params.mean_startup_delay_ms * log(rand())
+        startup_ms = min(startup_ms, params.max_startup_delay_ms)  # 上限でキャップ
         
         # ★ 起動時刻をコンソール出力 ★
         println("  [Term $(t.terminal_id)] Startup Time: $(round(startup_ms, digits=4)) ms")
@@ -390,8 +398,13 @@ function perform_hifi_synchronization(params::IntegratedParameters, terminals; o
             
             terminal_sync_infos[t.terminal_id] = first_slot_start_ms
             
+            # 同期精度計算: 最も近い理想ビーコン時刻を見つける
+            nearest_ideal_time = ideal_beacon_times[argmin(abs.(ideal_beacon_times .- beacon_arrival_ms))]
+            sync_error = beacon_arrival_ms - nearest_ideal_time
+            snr = 10*log10(mean(rx_power)*1000) - nf_dbm
+            
             # ログ記録
-            push!(sync_log_df, (t.terminal_id, "Success", t.distance_m, 10*log10(mean(rx_power)*1000), beacon_arrival_ms, first_slot_start_ms))
+            push!(sync_log_df, (t.terminal_id, "Success", t.distance_m, 10*log10(mean(rx_power)*1000), beacon_arrival_ms, first_slot_start_ms, nearest_ideal_time, sync_error, snr))
             println("  [Term $(t.terminal_id)] Sync Success: Detected at $(round(beacon_arrival_ms, digits=4)) ms (Dist: $(round(t.distance_m, digits=1))m, NF: $(round(nf_dbm, digits=1)) dBm, Thresh: $(round(thresh_dbm, digits=1)) dBm)")
 
             # ★ 端末1の受信電力データを保存 (同期成功時: 間欠受信モード) ★
@@ -452,7 +465,7 @@ function perform_hifi_synchronization(params::IntegratedParameters, terminals; o
             terminal_sync_infos[t.terminal_id] = nothing
             
             # ログ記録
-            push!(sync_log_df, (t.terminal_id, "Failed", t.distance_m, 10*log10(mean(rx_power)*1000), missing, missing))
+            push!(sync_log_df, (t.terminal_id, "Failed", t.distance_m, 10*log10(mean(rx_power)*1000), missing, missing, missing, missing, missing))
             println("  [Term $(t.terminal_id)] Sync Failed (Dist: $(round(t.distance_m, digits=1))m, NF: $(round(nf_dbm, digits=1)) dBm, Thresh: $(round(thresh_dbm, digits=1)) dBm)")
 
             # ★ 端末1の受信電力データを保存 (同期失敗時: 連続受信モード) ★
@@ -479,6 +492,59 @@ function perform_hifi_synchronization(params::IntegratedParameters, terminals; o
     out_path = joinpath(output_dir, "integrated_sync_log_$(timestamp).csv")
     CSV.write(out_path, sync_log_df)
     println("Sync Log saved to $out_path")
+    
+    # 同期成功率を表示
+    total_terminals = length(terminals)
+    synced_terminals = count(x -> x !== nothing, values(terminal_sync_infos))
+    sync_rate = (synced_terminals / total_terminals) * 100
+    
+    println("\n" * "="^60)
+    println("Synchronization Summary:")
+    println("  Total Terminals:    $total_terminals")
+    println("  Synced Terminals:   $synced_terminals")
+    println("  Failed Terminals:   $(total_terminals - synced_terminals)")
+    println("  Sync Success Rate:  $(round(sync_rate, digits=2)) %")
+    println("="^60)
+    
+    # 同期精度分析（成功した端末のみ）
+    synced_data = filter(row -> row.status == "Success", sync_log_df)
+    
+    if nrow(synced_data) > 0
+        errors = synced_data.sync_error_ms
+        distances = synced_data.distance_m
+        snrs = synced_data.snr_db
+        
+        # 統計量計算
+        mean_error = mean(errors)
+        std_error = std(errors)
+        min_error = minimum(errors)
+        max_error = maximum(errors)
+        
+        # 相関係数計算
+        cor_distance = cor(errors, distances)
+        cor_snr = cor(errors, snrs)
+        
+        println("\n" * "="^60)
+        println("Synchronization Accuracy Analysis:")
+        println("  Mean Sync Error:    $(round(mean_error, digits=4)) ms")
+        println("  Std Dev:            $(round(std_error, digits=4)) ms")
+        println("  Min Error:          $(round(min_error, digits=4)) ms")
+        println("  Max Error:          $(round(max_error, digits=4)) ms")
+        println("")
+        println("  Correlation with Distance: $(round(cor_distance, digits=3))")
+        println("  Correlation with SNR:      $(round(cor_snr, digits=3))")
+        println("="^60)
+        
+        # 精度サマリーをCSV保存
+        accuracy_summary = DataFrame(
+            metric = ["mean_error_ms", "std_dev_ms", "min_error_ms", "max_error_ms", "correlation_distance", "correlation_snr"],
+            value = [mean_error, std_error, min_error, max_error, cor_distance, cor_snr]
+        )
+        timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+        accuracy_path = joinpath(output_dir, "integrated_sync_accuracy_$(timestamp).csv")
+        CSV.write(accuracy_path, accuracy_summary)
+        println("Accuracy Summary saved to $accuracy_path")
+    end
     
     return terminal_sync_infos
 end
@@ -684,23 +750,35 @@ function run_integrated_simulation()
             push!(finished_tx, rec)
             
         else
-            # ビジー検出 → バックオフして再スケジュール
-            # 指数バックオフなどのロジックを入れる場合、新しい時刻で再挿入する
+            # ビジー検出 → スロットベースのバックオフ + チャネル再選択
+            # Slotted ALOHAでは次のスロット境界で再試行するのが自然
             
-            # 簡易実装: 10～100ms ランダムバックオフ
-            backoff_ms = 10.0 + rand() * 90.0
-            new_time = curr_t + backoff_ms
+            # バックオフスロット数をランダムに選択（1～5スロット後）
+            backoff_slots = rand(1:5)
+            
+            # 端末のスロット長（クロックドリフト考慮）
+            slot_len = params.slot_length_ms * me.clock_drift_factor
+            
+            # 端末の同期開始時刻を取得
+            # sync_results から first_slot_start_ms を取得する必要があるが、
+            # ここでは me.terminal_id から逆算できないので、
+            # 現在時刻から次のスロット境界を計算する簡易的な方法を使用
+            
+            # 現在のスロット境界からの経過時間
+            # first_slot_start は sync_results[me.terminal_id] だが、ここでは取得できない
+            # 代わりに、cand.time_global_ms がスロット境界にあると仮定し、
+            # そこから backoff_slots 分先のスロット境界を計算
+            
+            new_time = curr_t + backoff_slots * slot_len
             
             if new_time < params.simulation_duration_ms
+                # 新しいチャネルをランダムに選択（チャネル再選択）
+                new_channel = rand(1:params.num_channels)
+                
                 # 新しいイベントを作成
-                # SlotIndexは変わらないが時刻が変わる
-                new_cand = CandidateSlot(new_time, me, cand.slot_index, cand.channel)
+                new_cand = CandidateSlot(new_time, me, cand.slot_index, new_channel)
                 
                 # スタックに挿入 (降順を維持)
-                # searchsortedfirst(A, x, rev=true) は A[i] <= x となる最初の場所を返す
-                # つまり x より大きい要素の後ろ、x 以下の要素の前
-                # [500, 400, 300]. insert 350. sorted logic returns index 3 (value 300).
-                # insert at 3 -> [500, 400, 350, 300]. Correct.
                 idx = searchsortedfirst(candidates, new_cand, by=x->x.time_global_ms, rev=true)
                 insert!(candidates, idx, new_cand)
             end
