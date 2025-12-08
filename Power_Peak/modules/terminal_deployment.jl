@@ -12,6 +12,8 @@ struct TerminalInfo
     shadowing_db::Float64   # シャドウイング（dB）
     total_loss_db::Float64  # 総損失（パスロス+シャドウイング）（dB）
     rx_power_dbm::Float64   # 受信電力（dBm）
+    clock_drift_ppm::Float64  # クロックドリフト（ppm）
+    clock_drift_factor::Float64  # ドリフト係数（1.0 + ppm/1e6）
 end
 
 # ===== 端末配置パラメータ =====
@@ -87,7 +89,11 @@ function deploy_terminals_poisson(deployment_params::TerminalDeploymentParameter
             # 受信電力計算
             rx_power_dbm = tx_power_dbm - total_loss_db
             
-            terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+            # クロックドリフト初期化
+            drift_ppm = rand(-20.0:0.1:20.0)
+            drift_factor = 1.0 + drift_ppm / 1e6
+            
+            terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm, drift_ppm, drift_factor)
             push!(terminals, terminal)
             
             println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")
@@ -140,7 +146,11 @@ function deploy_terminals_fixed(deployment_params::TerminalDeploymentParameters,
         # 受信電力計算
         rx_power_dbm = tx_power_dbm - total_loss_db
         
-        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+        # クロックドリフト初期化
+        drift_ppm = rand(-20.0:0.1:20.0)
+        drift_factor = 1.0 + drift_ppm / 1e6
+        
+        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm, drift_ppm, drift_factor)
         push!(terminals, terminal)
         
         println("• 端末$(i): 位置($(x), $(y)) m, 距離$(round(distance, digits=1)) m")
@@ -186,7 +196,11 @@ function deploy_terminals_uniform(deployment_params::TerminalDeploymentParameter
         # 受信電力計算
         rx_power_dbm = tx_power_dbm - total_loss_db
         
-        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+        # クロックドリフト初期化
+        drift_ppm = rand(-20.0:0.1:20.0)
+        drift_factor = 1.0 + drift_ppm / 1e6
+        
+        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm, drift_ppm, drift_factor)
         push!(terminals, terminal)
         
         println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")
@@ -234,7 +248,11 @@ function deploy_terminals_random_fixed(deployment_params::TerminalDeploymentPara
         # 受信電力計算
         rx_power_dbm = tx_power_dbm - total_loss_db
 
-        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm)
+        # クロックドリフト初期化
+        drift_ppm = rand(-20.0:0.1:20.0)
+        drift_factor = 1.0 + drift_ppm / 1e6
+        
+        terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm, drift_ppm, drift_factor)
         push!(terminals, terminal)
 
             # println("• 端末$(i): 位置($(round(x, digits=1)), $(round(y, digits=1))) m, 距離$(round(distance, digits=1)) m")

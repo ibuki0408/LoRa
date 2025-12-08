@@ -56,6 +56,11 @@ function detect_collisions_sinr(finished_tx, sf::Int, noise_power_dbm::Float64)
             if i == j continue end
             p2 = finished_tx[j]
             
+            # 同一チャネルのみ干渉チェック（異なるチャネルは干渉しない）
+            if p1.channel != p2.channel
+                continue
+            end
+            
             # 時間重複チェック (Any overlap)
             if max(p1.start_ms, p2.start_ms) < min(p1.end_ms, p2.end_ms)
                 interference_w += 10^(p2.rx_power_at_gw / 10) * 1e-3

@@ -25,12 +25,14 @@ mutable struct IntegratedParameters
     # === LoRa固有 ===
     spreading_factor::Int
     lora_payload_bytes::Int
+    num_channels::Int  # マルチチャネル数（1-16、AS923準拠）
     
     # === シミュレーション制御 ===
     beacon_interval_ms::Float64
     simulation_duration_ms::Float64
     max_startup_delay_ms::Float64
     duty_cycle::Float64
+    mean_event_interval_ms::Float64 # ポアソン分布の平均送信間隔
     
     # === 環境モデル ===
     shadowing_enabled::Bool
@@ -76,7 +78,7 @@ function create_integrated_params()
         3.6,      # signal_bw_mhz
         0.125,    # terminal_bw_mhz
         7.68,     # tx_sampling_rate_mhz
-        2.0,      # rx_sampling_rate_mhz
+        1.0,      # rx_sampling_rate_mhz
         13.0,     # tx_power_dbm
         6.0,      # noise_figure_db
         
@@ -87,22 +89,24 @@ function create_integrated_params()
         0.0,      # packet_airtime_ms (自動計算)
         0.1,      # transmission_prob
         true,  # enable_carrier_sense (true: LBT有効, false: 純粋ALOHA)
-        -120.0,   # cs_threshold_dbm
+        -80.0,   # cs_threshold_dbm
         
-        # === LoRa固有 ===
+        # === LoRa固有パラメータ ===
         sf,
         payload_bytes,
+        1,        # num_channels (AS923 Japan typical (1-16))
         
         # === シミュレーション制御 ===
         20.0,  # beacon_interval_ms
         600000.0, # simulation_duration_ms (10分)
         200.0,    # max_startup_delay_ms
         0.01,     # duty_cycle (1%)
+        60000.0,  # mean_event_interval_ms (平均60秒間隔 = 少し余裕を持たせる)
         
         # === 環境モデル ===
         true,     # shadowing_enabled
-        0.0,      # shadowing_std_db
-        2.5,      # pass_loss_exp
+        8.0,      # shadowing_std_db
+        2.7,      # pass_loss_exp
         
         # === Out-of-band同期 ===
         sync_freq_ghz,
@@ -114,7 +118,7 @@ function create_integrated_params()
         43.0,     # gw_tx_power_dbm
         9.0,      # noise_floor_window_ms
         10.0,     # detection_margin_db
-        3,        # min_samples
+        2,        # min_samples
         1.0,      # debounce_time_ms
         110.0     # initial_wait_ms
     )
@@ -131,6 +135,10 @@ include("modules/terminal_deployment.jl")
 include("modules/local_clock.jl")
 include("modules/lora_airtime.jl")
 include("modules/collision_detection.jl")
+include("modules/packet_generation.jl")
+
+using .PacketGeneration
+
 
 # main_simulation.jl から重要な関数を再定義・統合
 # (依存関係を断ち切るため、必要なロジックをここに移植します)
@@ -266,6 +274,7 @@ struct CandidateSlot
     time_global_ms::Float64  # グローバル時刻での開始
     terminal_node            # 端末オブジェクト
     slot_index::Int
+    channel::Int             # チャネル番号（1-based）
 end
 
 mutable struct TransmissionRecord
@@ -273,9 +282,11 @@ mutable struct TransmissionRecord
     start_ms::Float64
     end_ms::Float64
     tx_power_dbm::Float64
-    x::Float64; y::Float64
+    x::Float64
+    y::Float64
     status::String
     rx_power_at_gw::Float64
+    channel::Int  # チャネル番号（1-based）
 end
 
 # ==========================================
@@ -525,14 +536,48 @@ function run_integrated_simulation()
         start_ms = sync_results[t.terminal_id]
         if start_ms === nothing continue end # 同期失敗端末はスキップ
         
-        # ランダムな初期オフセットを追加（衝突を観察するため）
-        random_offset = rand() * params.slot_length_ms
-        curr_ms = start_ms + random_offset
+        # クロックドリフトを考慮したToAとオフ期間
+        # ToAは送信側クロックに依存するため、実時間は ToA * drift_factor
+        actual_airtime = params.packet_airtime_ms * t.clock_drift_factor
+        # DCオフ期間 = ToA * (1/DC - 1)
+        min_off_period = actual_airtime * (1.0 / params.duty_cycle - 1.0)
+        
+        curr_ms = start_ms
         idx = 1
-        while curr_ms < params.simulation_duration_ms
-            push!(candidates, CandidateSlot(curr_ms, t, idx))
-            curr_ms += params.slot_length_ms
+        
+        # 最初のパケット送信
+        # ランダムチャネル選択
+        channel = rand(1:params.num_channels)
+        push!(candidates, CandidateSlot(curr_ms, t, idx, channel))
+        
+        # 次回送信可能時刻 (DC明け)
+        next_available = curr_ms + actual_airtime + min_off_period
+        
+        while true
+            # モジュールを使用して次の送信時刻を生成
+            actual_next_tx = generate_next_poisson_time(curr_ms, params.mean_event_interval_ms, t.clock_drift_factor, next_available)
+            
+            # 4. スロット境界へのスナップ (Slotted ALOHA的な動作を維持する場合)
+            # Integrated Simはスロットベースなので、最も近いスロット境界に合わせる
+            # 相対的なスロット数計算
+            diff = actual_next_tx - start_ms
+            slot_len = params.slot_length_ms * t.clock_drift_factor
+            num_slots = ceil(diff / slot_len) # 切り上げで確実に未来のスロットへ
+            
+            next_tx_snapped = start_ms + num_slots * slot_len
+            
+            if next_tx_snapped >= params.simulation_duration_ms
+                break
+            end
+            
+            curr_ms = next_tx_snapped
             idx += 1
+            
+            channel = rand(1:params.num_channels)
+            push!(candidates, CandidateSlot(curr_ms, t, idx, channel))
+            
+            # 次のDC明け更新
+            next_available = curr_ms + actual_airtime + min_off_period
         end
     end
     
@@ -550,6 +595,9 @@ function run_integrated_simulation()
     
     active_tx = TransmissionRecord[]
     finished_tx = TransmissionRecord[]
+    
+    # CS統計
+    cs_stats = Tuple{Bool, Float64}[]
     
     # 端末ごとの次回送信可能時刻 (Duty Cycle用)
     next_available_time = Dict{Int, Float64}()
@@ -575,9 +623,16 @@ function run_integrated_simulation()
         
         # C. キャリアセンス (LBT)
         is_busy = false
+        max_rssi = -Inf
+        
         if params.enable_carrier_sense
             # active_tx 内のすべての送信 (過去に開始し、現在まだ終わっていない) との干渉確認
             for other in active_tx
+                # 同一チャネルのみチェック（異なるチャネルは干渉しない）
+                if other.channel != cand.channel
+                    continue
+                end
+                
                 # other.start_ms <= curr_t は常に真 (DESなので)
                 # other.end_ms > curr_t も filter済なので常に真
                 # よって、active_tx にあるものは全て「現在送信中」
@@ -593,12 +648,19 @@ function run_integrated_simulation()
                 
                 rssi = other.tx_power_dbm - pl 
                 
+                if rssi > max_rssi
+                    max_rssi = rssi
+                end
+                
                 if rssi > params.cs_threshold_dbm
                     is_busy = true
-                    break
+                    # break # 他の干渉源も考慮するため、breakしない
                 end
             end
         end
+        
+        # 統計収集
+        push!(cs_stats, (is_busy, max_rssi))
         
         # D. 送信判定
         if !is_busy
@@ -617,7 +679,7 @@ function run_integrated_simulation()
             end
             rx_gw = params.tx_power_dbm - pl_gw
             
-            rec = TransmissionRecord(me.terminal_id, curr_t, curr_t+dur, params.tx_power_dbm, me.x_m, me.y_m, "Success", rx_gw)
+            rec = TransmissionRecord(me.terminal_id, curr_t, curr_t+dur, params.tx_power_dbm, me.x_m, me.y_m, "Success", rx_gw, cand.channel)
             push!(active_tx, rec)
             push!(finished_tx, rec)
             
@@ -632,7 +694,7 @@ function run_integrated_simulation()
             if new_time < params.simulation_duration_ms
                 # 新しいイベントを作成
                 # SlotIndexは変わらないが時刻が変わる
-                new_cand = CandidateSlot(new_time, me, cand.slot_index)
+                new_cand = CandidateSlot(new_time, me, cand.slot_index, cand.channel)
                 
                 # スタックに挿入 (降順を維持)
                 # searchsortedfirst(A, x, rev=true) は A[i] <= x となる最初の場所を返す
@@ -660,6 +722,40 @@ function run_integrated_simulation()
         println("  PER:           $(round(collisions/length(finished_tx)*100, digits=2)) %")
     else
         println("  PER:           N/A")
+    end
+    println("-"^30)
+    
+    # RSSI統計表示
+    println("Carrier Sense Statistics:")
+    busy_rssis = [x[2] for x in cs_stats if x[1]]
+    idle_rssis = [x[2] for x in cs_stats if !x[1] && x[2] > -Inf]
+    
+    println("  Threshold:        $(params.cs_threshold_dbm) dBm")
+    println("  Noise Floor:      $(round(noise_power_dbm, digits=2)) dBm")
+    println("  Total Attempts:   $(length(cs_stats))")
+    println("  Busy Count:       $(length(busy_rssis))")
+    
+    if !isempty(busy_rssis)
+        println("  Busy RSSI (detected interference):")
+        println("    Mean: $(round(mean(busy_rssis), digits=2)) dBm")
+        println("    Min:  $(round(minimum(busy_rssis), digits=2)) dBm")
+        println("    Max:  $(round(maximum(busy_rssis), digits=2)) dBm")
+        
+        # ヒストグラム的な表示
+        println("    Distribution:")
+        for range_start in -120:10:-60
+            cnt = count(x -> x >= range_start && x < range_start+10, busy_rssis)
+            println("      [$range_start, $(range_start+10)): $cnt")
+        end
+    end
+    
+    println("  Idle Count:       $(length(cs_stats) - length(busy_rssis))")
+    if !isempty(idle_rssis)
+        println("  Idle RSSI (detected but below threshold):")
+        println("    Mean: $(round(mean(idle_rssis), digits=2)) dBm")
+        println("    Max:  $(round(maximum(idle_rssis), digits=2)) dBm")
+    else
+        println("  Idle RSSI: None detected (Clean Channel)")
     end
     println("-"^30)
 
@@ -719,6 +815,14 @@ function run_integrated_simulation()
         savefig(p, out_png)
         println("Plot saved to $out_png")
     end
+    
+    # 結果を返す（評価スクリプト用）
+    return Dict(
+        "total_packets" => length(finished_tx),
+        "success" => success,
+        "collisions" => collisions,
+        "per" => isempty(finished_tx) ? 0.0 : collisions / length(finished_tx) * 100
+    )
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
