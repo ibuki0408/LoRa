@@ -28,6 +28,8 @@ struct TerminalDeploymentParameters
     path_loss_exponent::Float64  # パスロス指数
     reference_distance_m::Float64  # 参照距離（m）
     reference_path_loss_db::Float64  # 参照距離でのパスロス（dB）
+    bs_x_m::Float64          # 基地局X座標（m）- 距離計算の基準点
+    bs_y_m::Float64          # 基地局Y座標（m）- 距離計算の基準点
 end
 
 # ===== パスロス計算（簡易版） =====
@@ -70,7 +72,8 @@ function deploy_terminals_poisson(deployment_params::TerminalDeploymentParameter
         # 直交座標に変換
         x = r * cos(theta)
         y = r * sin(theta)
-        distance = sqrt(x^2 + y^2)
+        # BSからの距離を計算
+        distance = sqrt((x - deployment_params.bs_x_m)^2 + (y - deployment_params.bs_y_m)^2)
         
         # 距離制限をチェック
         if distance >= deployment_params.min_distance_m && distance <= deployment_params.max_distance_m
@@ -90,7 +93,7 @@ function deploy_terminals_poisson(deployment_params::TerminalDeploymentParameter
             rx_power_dbm = tx_power_dbm - total_loss_db
             
             # クロックドリフト初期化
-            drift_ppm = rand(-20.0:0.1:20.0)
+            drift_ppm = rand(-4.0:0.1:4.0)
             drift_factor = 1.0 + drift_ppm / 1e6
             
             terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm, drift_ppm, drift_factor)
@@ -129,7 +132,8 @@ function deploy_terminals_fixed(deployment_params::TerminalDeploymentParameters,
     
     for i in 1:min(deployment_params.num_terminals, length(fixed_positions))
         x, y = fixed_positions[i]
-        distance = sqrt(x^2 + y^2)
+        # BSからの距離を計算
+        distance = sqrt((x - deployment_params.bs_x_m)^2 + (y - deployment_params.bs_y_m)^2)
         
         # パスロス計算
         path_loss_db = calculate_path_loss_simple(
@@ -147,7 +151,7 @@ function deploy_terminals_fixed(deployment_params::TerminalDeploymentParameters,
         rx_power_dbm = tx_power_dbm - total_loss_db
         
         # クロックドリフト初期化
-        drift_ppm = rand(-20.0:0.1:20.0)
+        drift_ppm = rand(-4.0:0.1:4.0)
         drift_factor = 1.0 + drift_ppm / 1e6
         
         terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm, drift_ppm, drift_factor)
@@ -177,9 +181,11 @@ function deploy_terminals_uniform(deployment_params::TerminalDeploymentParameter
     # 円周上に均等配置
     for i in 1:num_terminals
         angle = 2π * (i - 1) / num_terminals  # 均等な角度
-        distance = max_distance * 0.8  # 最大距離の80%の位置
-        x = distance * cos(angle)
-        y = distance * sin(angle)
+        radius = max_distance * 0.8  # 最大距離の80%の位置
+        x = radius * cos(angle)
+        y = radius * sin(angle)
+        # BSからの距離を計算
+        distance = sqrt((x - deployment_params.bs_x_m)^2 + (y - deployment_params.bs_y_m)^2)
         
         # パスロス計算
         path_loss_db = calculate_path_loss_simple(
@@ -197,7 +203,7 @@ function deploy_terminals_uniform(deployment_params::TerminalDeploymentParameter
         rx_power_dbm = tx_power_dbm - total_loss_db
         
         # クロックドリフト初期化
-        drift_ppm = rand(-20.0:0.1:20.0)
+        drift_ppm = rand(-4.0:0.1:4.0)
         drift_factor = 1.0 + drift_ppm / 1e6
         
         terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm, drift_ppm, drift_factor)
@@ -231,7 +237,8 @@ function deploy_terminals_random_fixed(deployment_params::TerminalDeploymentPara
 
         x = r * cos(theta)
         y = r * sin(theta)
-        distance = sqrt(x^2 + y^2)
+        # BSからの距離を計算
+        distance = sqrt((x - deployment_params.bs_x_m)^2 + (y - deployment_params.bs_y_m)^2)
 
         # パスロス計算
         path_loss_db = calculate_path_loss_simple(
@@ -249,7 +256,7 @@ function deploy_terminals_random_fixed(deployment_params::TerminalDeploymentPara
         rx_power_dbm = tx_power_dbm - total_loss_db
 
         # クロックドリフト初期化
-        drift_ppm = rand(-20.0:0.1:20.0)
+        drift_ppm = rand(-4.0:0.1:4.0)
         drift_factor = 1.0 + drift_ppm / 1e6
         
         terminal = TerminalInfo(i, x, y, distance, path_loss_db, shadowing_db, total_loss_db, rx_power_dbm, drift_ppm, drift_factor)
@@ -321,7 +328,9 @@ function test_terminal_deployment()
         4.7e9,              # 周波数（Hz）
         3.0,                # パスロス指数
         1.0,                # 参照距離（m）
-        0.0                 # 参照距離でのパスロス（dB）
+        0.0,                # 参照距離でのパスロス（dB）
+        0.0,                # bs_x_m（原点）
+        0.0                 # bs_y_m（原点）
     )
     
     # 端末配置

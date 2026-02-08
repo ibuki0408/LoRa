@@ -18,7 +18,7 @@
 ```
 Power_Peak/
 ├── integrated_lora_sim.jl    # 【メイン】統合シミュレーション実行スクリプト
-├── csma_ca_sim.jl            # CSMA/CA比較用シミュレーション
+├── lbt_aloha_sim.jl          # LBT-ALOHA比較用シミュレーション
 ├── modules/                  # 機能別モジュール群
 │   ├── signal_generation.jl    # 信号生成 (5G SSB)
 │   ├── path_loss.jl            # パスロス計算 (Log-Distanceモデル)
@@ -67,8 +67,8 @@ Power_Peak/
    - PER（Packet Error Rate）計算
    - 統計出力とグラフ生成
 
-### 2. `csma_ca_sim.jl`
-CSMA/CA比較用シミュレーション。Integrated LoRa Simとの性能比較に使用。
+### 2. `lbt_aloha_sim.jl`
+LBT-ALOHA比較用シミュレーション（Unslotted ALOHA + LBT）。Integrated LoRa Simとの性能比較に使用。
 
 ### 3. `modules/` (モジュール群)
 - **`packet_generation.jl`**: ポアソン分布に従ったパケット生成
@@ -83,9 +83,9 @@ CSMA/CA比較用シミュレーション。Integrated LoRa Simとの性能比較
 julia integrated_lora_sim.jl
 ```
 
-### CSMA/CA比較シミュレーション
+### LBT-ALOHA比較シミュレーション
 ```bash
-julia csma_ca_sim.jl
+julia lbt_aloha_sim.jl
 ```
 
 ## 出力ファイル
@@ -99,7 +99,7 @@ julia csma_ca_sim.jl
 - `integrated_term1_power_*.csv`: 端末1の受信電力データ
 
 ### `result_csma_ca/`
-- `csma_ca_summary_*.csv`: CSMA/CA結果サマリー
+- `csma_ca_summary_*.csv`: LBT-ALOHA結果サマリー
 
 ## パフォーマンス
 
@@ -111,11 +111,11 @@ julia csma_ca_sim.jl
 - 総パケット数: 482
 - 成功: 459, 衝突: 23
 
-**CSMA/CA Sim:**
+**LBT-ALOHA Sim:**
 - PER: **4-5%**
 - 総パケット数: 450-485
 
-→ **Integrated LoRa SimはCSMA/CAと同等の性能を達成**
+→ **Integrated LoRa SimはLBT-ALOHAと同等の性能を達成**
 
 ## 主要パラメータ
 
@@ -143,4 +143,21 @@ julia csma_ca_sim.jl
 2. **高精度同期評価**: 理想値との誤差分析、相関分析
 3. **改良型MAC**: スロット境界バックオフ + チャネル再選択
 4. **Out-of-Band同期**: 同期とデータを異なる周波数帯で分離
-5. **CSMA/CA比較**: 同一条件での性能比較が可能
+5. **LBT-ALOHA比較**: 同一条件での性能比較が可能
+
+## プロトコル分類
+
+### Integrated LoRa Sim
+**Slotted ALOHA + LBT**
+- 同期によるスロット境界
+- LBT（Listen Before Talk）
+- スロットベースバックオフ
+- チャネル再選択
+
+### LBT-ALOHA Sim (lbt_aloha_sim.jl)
+**Unslotted ALOHA + LBT**
+- 非同期（連続時間）
+- LBT（Listen Before Talk）
+- ランダムバックオフ
+
+**注**: 両手法ともRTS/CTS、ACKは未実装（LoRaWAN準拠）

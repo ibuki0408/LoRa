@@ -48,7 +48,13 @@ function generate_ofdm_signal_with_qpsk(bandwidth_hz::Float64, duration_s::Float
     # IFFTで時間ドメイン信号を生成
     time_domain = ifft(freq_domain)
     
-    # 送信電力に合わせてスケーリング（正規化の代わり）
+    # 正規化（IFFTによるパワー変動を補正し、平均パワーを1にする）
+    current_power = mean(abs2.(time_domain))
+    if current_power > 0
+        time_domain = time_domain ./ sqrt(current_power)
+    end
+    
+    # 送信電力に合わせてスケーリング
     linear_power = 10^(tx_power_dbm / 10) * 1e-3  # dBm → W
     time_domain = time_domain * sqrt(linear_power)
     
@@ -88,21 +94,101 @@ function generate_periodic_sync_signals(params::SignalParameters, interval_ms::F
             signal_length = end_sample - start_sample + 1
             tx_signal[start_sample:end_sample] = signal_samples[1:signal_length]
             signal_count += 1
-            println("送信信号 $(signal_count): 時刻 $(signal_time) ms ～ $(signal_time + signal_duration_ms) ms")
+            # println("送信信号 $(signal_count): 時刻 $(signal_time) ms ～ $(signal_time + signal_duration_ms) ms")
         end
     end
     
-    println("送信側パラメータ:")
-    println("• 開始遅延: $(start_delay_ms) ms")
-    println("• 信号間隔: $(interval_ms) ms")
-    println("• 信号持続時間: $(signal_duration_ms) ms")
-    println("• 総持続時間: $(total_duration_ms) ms")
-    println("• 送信信号数: $(signal_count)")
-    println("• 送信電力: $(params.tx_power_dbm) dBm")
+    # サマリーのみ表示
+    println("同期信号生成完了:")
+    println("  送信信号数: $(signal_count)")
+    println("  信号間隔: $(interval_ms) ms")
+    println("  総持続時間: $(total_duration_ms) ms")
     println()
     
     # Return ideal beacon times (center of each transmission) for accuracy analysis
     return time_axis, tx_signal, signal_count, signal_times
+end
+
+# ===== ビーコン送信時刻の事前計算 =====
+function calculate_beacon_times(interval_ms::Float64, total_duration_ms::Float64, start_delay_ms::Float64)
+    beacon_times = Float64[]
+    current_time = start_delay_ms
+    # 信号長は仮で計算（パラメータから本当は取るべきだが、ここではタイミングリスト作成が主目的）
+    # 実際は呼び出し元で管理するか、パラメータとして渡す
+    
+    while current_time < total_duration_ms
+        push!(beacon_times, current_time)
+        current_time += interval_ms
+    end
+    return beacon_times
+end
+
+# ===== 指定区間の同期信号生成 (メモリ節約版) =====
+function generate_sync_signal_segment(params::SignalParameters, beacon_times::Vector{Float64}, segment_start_ms::Float64, segment_end_ms::Float64)
+    sampling_rate_hz = params.sampling_rate_hz
+    signal_duration_ms = params.duration_s * 1000.0
+    
+    # セグメントの長さ（サンプル数）
+    segment_duration_ms = segment_end_ms - segment_start_ms
+    num_samples = Int(ceil(segment_duration_ms * sampling_rate_hz / 1000.0))
+    
+    segment_signal = zeros(ComplexF64, num_samples)
+    
+    # このセグメントに関係するビーコンを探す
+    # ビーコンの開始時刻 〜 終了時刻 が セグメントの開始 〜 終了 と重なればOK
+    
+    # 1つのビーコン信号波形（共通で使い回して生成）
+    # パフォーマンスのため、ここで1つ作ってしまう
+    # ※ 本来はビーコンごとにランダムデータ変調すべきなら都度生成だが、
+    #    ここでは簡略化のため、または都度生成でも可。
+    #    元の実装では "各送信で異なるランダムシードを使用" とあるので都度生成する。
+    
+    for beacon_start_ms in beacon_times
+        beacon_end_ms = beacon_start_ms + signal_duration_ms
+        
+        # 重なり判定
+        if beacon_end_ms > segment_start_ms && beacon_start_ms < segment_end_ms
+            # 重なっている
+            
+            # 今回のビーコン用の信号生成
+            beacon_waveform = generate_ofdm_signal_with_qpsk(params.bandwidth_hz, params.duration_s, params.sampling_rate_hz, params.tx_power_dbm)
+            beacon_len = length(beacon_waveform)
+            
+            # 配置位置の計算
+            # セグメント内でのビーコン開始位置（サンプルインデックス、1-based）
+            # start_idx_in_segment = (beacon_start_ms - segment_start_ms) * fs + 1
+            
+            start_sample_global = Int(floor(beacon_start_ms * sampling_rate_hz / 1000.0)) + 1
+            start_segment_global = Int(floor(segment_start_ms * sampling_rate_hz / 1000.0)) + 1
+            
+            offset = start_sample_global - start_segment_global + 1
+            
+            # コピー範囲
+            src_start = 1
+            src_end = beacon_len
+            dst_start = offset
+            dst_end = offset + beacon_len - 1
+            
+            # クリップ（セグメントからはみ出す部分をカット）
+            if dst_start < 1
+                cut = 1 - dst_start
+                src_start += cut
+                dst_start = 1
+            end
+            if dst_end > num_samples
+                cut = dst_end - num_samples
+                src_end -= cut
+                dst_end = num_samples
+            end
+            
+            if src_start <= src_end && dst_start <= dst_end
+                # 重畳（加算）
+                segment_signal[dst_start:dst_end] .+= beacon_waveform[src_start:src_end]
+            end
+        end
+    end
+    
+    return segment_signal, num_samples
 end
 
 # ===== 信号生成のテスト関数 =====
