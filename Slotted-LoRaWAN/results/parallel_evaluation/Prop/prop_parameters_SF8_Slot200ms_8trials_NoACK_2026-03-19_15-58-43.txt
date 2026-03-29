@@ -1,0 +1,40 @@
+============================================================
+Simulation Parameters
+Execution Time: 2026-03-19 15:58:43
+============================================================
+
+[Evaluation Settings]
+  Terminal Counts:      [100, 200, 300, 400, 500]
+  Number of Trials:     8
+
+[LoRa Parameters]
+  Spreading Factor:     8
+  Payload Size:         10 bytes
+  Bandwidth:            125 kHz
+  Number of Channels:   8
+
+[MAC Layer]
+  Slot Length:          200.0 ms
+  Beacon Interval:      100.0 ms
+  Initial Window:       200.0 ms (auto-calculated)
+  TX Jitter Max:        50.0 ms
+  Enable ACK:           false
+  Max Retries:          3
+  Max Buffer Size:      10
+  LBT Enabled:          true
+  LBT Threshold:        -80.0 dBm
+
+[Environment]
+  Area Size:            2000.0 m
+  Deployment Radius:    1000.0 m
+  Path Loss Exponent:   2.7
+  Shadowing Std Dev:    8.0 dB
+  TX Power:             13.0 dBm
+  Noise Figure:         6.0 dB
+
+[Simulation Control]
+  Duration:             3600000.0 ms (60 min)
+  Max Startup Delay:    60000.0 ms
+  Duty Cycle:           1.0 %
+  Mean Event Interval:  60000.0 ms
+============================================================

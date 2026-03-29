@@ -1,0 +1,16 @@
+============================================================
+Simulation Parameters
+Execution Time: 2026-03-20 00:18:10
+============================================================
+
+[Evaluation Settings]
+  Terminal Counts:      [100, 200, 300, 400, 500]
+  Number of Trials:     8
+
+[LoRa Parameters]
+  Spreading Factor:     8
+  Payload Size:         10 bytes
+  Bandwidth:            125 kHz
+  Number of Channels:   8
+
+[MAC Layer]
