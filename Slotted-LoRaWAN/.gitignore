@@ -1,0 +1,36 @@
+# シミュレーション結果ディレクトリ
+results_sync_simulation/
+results_sync_simulation_fixed/
+results_sync_simulation_resampling/
+results_sync_simulation_multipath/
+
+# CSVファイル
+*.csv
+
+# 画像ファイル
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# プロットファイル
+*.mjox
+
+# 一時ファイル
+*.tmp
+*.temp
+
+# システムファイル
+.DS_Store
+Thumbs.db
+
+# ログファイル
+*.log
+
+# バックアップファイル
+*.bak
+*.backup
+
+# 実行時の一時ファイル
+*.out
+*.err

@@ -112,7 +112,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     # 設定: ここで評価パラメータを指定
     # ============================================================
     TERMINAL_COUNTS = [100,200,300,400,500]  # 評価する端末数のリスト
-    NUM_TRIALS = 8         # 各設定での試行回数
+    NUM_TRIALS = 16         # 各設定での試行回数
     SPREADING_FACTOR = 8    # 拡散率 (7-12)
     SLOT_LENGTH_MS = 200.0   # スロット長 (ms)
     BEACON_INTERVAL_MS = 100.0  # ビーコン間隔 (ms)
