@@ -35,7 +35,7 @@ for N in N_RANGE
 end
 
 println("Running theory.jl...")
-cd("analysis")
+cd("theory")
 try
     run(`julia theory.jl`)
 catch e
