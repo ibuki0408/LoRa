@@ -1,4 +1,4 @@
-using Random, Statistics, Printf, DataFrames, CSV, Plots, Dates, LinearAlgebra, DSP
+using Random, Statistics, Printf, DataFrames, CSV, Dates, LinearAlgebra, DSP
 
 # ==========================================
 # 1. ライブラリ読み込み

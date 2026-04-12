@@ -5,7 +5,7 @@
 using Distributions
 using Random
 using Statistics
-using Plots
+using Random
 using Printf
 using CSV
 using DataFrames

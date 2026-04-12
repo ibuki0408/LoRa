@@ -4,12 +4,6 @@ authors = ["kimparaibuki"]
 version = "0.1.0"
 
 [deps]
-CSV = "336ed68f-0bac-5ca0-87d4-7b163466185d"
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
-Dates = "ade2ca70-3891-5945-930b-0100fe3938fe"
-DSP = "717857b8-e24f-59d4-8391-715c615612c5"
-LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
-Printf = "de0858da-63ee-5623-b4a4-83eeb5e7bd64"
-Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5d"
-Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+DSP = "717857b8-e6f2-59f4-9121-6e50c889abd2"

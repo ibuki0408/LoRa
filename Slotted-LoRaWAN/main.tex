@@ -1,0 +1,155 @@
+\documentclass[twocolumn,a4paper,dvipdfmx]{ieicejsp}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{textcomp}
+\usepackage{latexsym}
+%\usepackage[fleqn]{amsmath}
+\usepackage{amssymb}
+\usepackage{float}
+\usepackage{graphicx}
+\usepackage{newenum}
+\usepackage{amsmath}
+\usepackage[legacycolonsymbols]{mathtools}
+\usepackage{caption}
+\usepackage{color}
+\usepackage{subfigure}
+
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+
+%\bibliographystyle{jIEEEtran}
+
+% \setlength{\textheight}{276.2mm}		%本文全高    297-1inch(25.4)*2-276.2+15*2 = 0
+% \setlength{\topmargin}{-15mm}			%用紙上の余白 297-1inch(25.4)*2-276.2+15*2 = 0
+
+\captionsetup[figure]{format=plain, labelformat=simple, labelsep=period, font=small}
+\captionsetup[table]{format=plain, labelformat=simple, labelsep=period, font=small}
+
+\title{{\bf 令和7年度ハイテクインター共同研究に係る報告書}
+  {\normalsize \\Wideband External Signal-Aided Out-of-Band Synchronization for Slotted LoRaWAN}}
+  \author{
+    金原 伊吹$^\dagger$ \\ Ibuki Kimpara \and
+    赤須 賢司$^\ddagger$ \\ Kenji Akasu \and
+    安達 宏一$^\dagger$ \\ Koichi Adachi
+  }
+  \affliate{%
+   $^\dagger$ 慶應義塾大学　理工学部情報工学科\\
+   Department of Information and Computer Science, Faculty of Science and Technology, Keio University\\
+   $^\ddagger$ 電気通信大学　先端ワイヤレス・コミュニケーション研究センター\\
+   Advanced Wireless \& Communication Research Center, The University of Electro-Communications\\
+}
+
+\begin{document}
+\maketitle
+\fontsize{10pt}{0cm}\selectfont
+
+\section{はじめに}
+ 近年，IoT（Internet of Things）の普及に伴い，低消費電力で長距離通信を実現する通信方式であるLoRaWAN（Long Range Wide Area Network）が注目を集めている．
+LoRaWANは，免許不要帯域を利用するため低コストで導入可能であるが，単位時間あたりの送信時間であるDC（Duty Cycle）制約が存在している．
+また，そのMAC（Medium Access Control）層では，実装の単純さからPure ALOHAやListen Before Talk（LBT）が採用されている．
+PureALOHAは，各端末が任意のタイミングでパケット送信を行うため端末数が増加に伴ってパケット衝突確率が増加する．
+LBTでは，パケット送信前に端末がキャリアセンス（CS：Carrier Sense）を行うことでパケット衝突を回避できるが，隠れ端末同士の同時送信によってパケット衝突が発生する．
+一方，Slotted ALOHA（S-ALOHA）では，時間をスロットに分割し，全端末がスロット境界に合わせてパケットを送信するため，Pure ALOHAと比較してパケット衝突確率を低減できるが，端末間の厳密な時間同期が必要となる\cite{9321549}．
+%時間同期手法は，大きくIn-Band同期とOut-of-Band同期に分類される．In-Band同期は，データ通信と同様の周波数帯域を用いて時間情報を取得する方式であり，Out-of-Band同期はデータ通信とは異なる周波数帯域を用いて時間情報を取得する方式である．
+既存の時間同期手法として，GPSやFM-RDS（Frequency Modulation-Radio Data System）を用いたOut-of-Band同期が提案されているが，GPSは高コスト・高消費電力で屋内利用が困難，FM-RDSは同期精度が低く専用受信機が必要という問題がある\cite{9321549,7544638}．
+
+ そこで本研究では，各端末が他システムが送信する外部信号を利用したOut-Of-Band同期を行い，端末ごとに異なるスロット境界を設定するプロトコルを提案する．
+
+\section{システムモデル}
+ 本研究では，図\ref{fig:system_model}に示すようなシステムモデルを考える．
+端末はGW（Gate-Way）を中心とした半径1kmの円形エリア内にランダムに配置され，基地局から周期的な外部信号が送信されている環境を想定する．
+%各端末は外部信号を同期信号として受信し，Out-of-Band同期を行う．
+データ通信と時間同期は異なる周波数帯を用いることでOut-of-Band同期を実現し，使用する周波数帯はそれぞれ920MHz帯と3.7GHz帯とする．
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.8\linewidth]{./fig/system_model.png}
+  \caption{システムモデル}
+  \label{fig:system_model}
+\end{figure}
+
+\section{提案手法における同期方式}
+ LoRa端末の低消費電力性を維持するため，本手法では同期信号の復調を行わず，受信電力のピーク検知により同期信号到来時刻を決定する．
+%本稿では，同期に利用する周期的な信号として5G NR（New Radio）の基地局から周期的に送信される同期信号ブロック（SSB: Synchronization Signal Block）内の
+%セカンダリ同期信号（SSS: Secondary Synchronization Signal）を想定する\cite{8644466}．
+%SSSは127個のサブキャリアからなる直交周波数分割多重（OFDM：Orthogonal Frequency Division Multiplexing）信号であり，
+端末は受信窓を一定時間開き，受信電力のピーク検知を行うことで同期信号の到来時刻を検出する．
+端末$i$は受信窓内で，ノイズフロアを推定し，ノイズフロアに固定値を加算することで同期信号の受信を判別する閾値を決定する．
+受信電力が閾値を超える区間を検出し，閾値を下回る時刻を同期信号の受信完了時刻として記録する．
+そして，受信窓内における最後の同期信号受信時刻$t_{\mathrm{sync}}^{i}$ [sec]を先頭スロット時刻とする．
+端末$i$は，$t_{\mathrm{sync}}^{i}$ からスロット長$T_{\mathrm{slot}}$ [sec]ごとに%周期的な
+スロット境界を設定する．
+図\ref{fig:slot_setting}に，2端末環境におけるスロット境界の設定例を示す．ここで，端末$i$の$k$番目のスロット境界を$t_{\mathrm{slot}_{k}}^{i}$ [sec]とする．
+端末の起動時刻や基地局からの距離によって，$t_{\mathrm{sync}}^{i}$ は端末ごとに異なる値をとり，結果としてスロット境界も端末ごとに異なる．
+%各端末は，スロット境界に合わせてパケット送信を行うが，
+そこで，スロット境界が一致する端末間の衝突を回避するため，スロット境界に対してランダムオフセットを付加し，パケット送信をする．
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\linewidth]{./fig/Slotted-LoRaWAN.png}
+  \caption{他システム信号の受信に基づく時刻同期例}
+  \label{fig:slot_setting}
+\end{figure}
+
+\section{計算機シミュレーション}
+本シミュレーションでは，提案手法（Prop.）とLBTをPER特性を指標として評価する．
+端末はゲートウェイ（GW：Gate-Way）を中心とした半径1 kmの円形エリアにランダムに配置しており，平均60秒間隔のポアソン分布に従いパケットを生起する．
+%提案手法では，同期信号であるSSSはGWの位置から3.7GHz帯で送信されている想定であり，パケット送信に関しては920MHz帯の使用を想定する．また両手法とも送信前にCSを実行する．
+提案手法では，同期信号の送信とパケット送信はそれぞれ3.7GHz帯と920MHz帯を想定する．
+図\ref{fig:PER_sf8}に端末数に対するPER特性を示す．
+提案手法は，端末数によらずLBTと比較して低いPERを達成している．
+端末数が400台の場合，LBTが約$21.1\%$であるのに対し，提案手法のPERは約$15.9\%$となり，PERを約$5.2\%$低減できていることがわかる．
+これは，提案手法のスロット化とランダムオフセットにより端末の送信タイミングを分散させることで，パケット衝突を効果的に抑制できるためであると考えられる．
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\linewidth]{./fig/PER_sf8.png}
+  \caption{端末数に対するPER特性}
+  \label{fig:PER_sf8}
+\end{figure}
+  
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{理論解析モデル}
+提案手法のパケット誤り率（PER：Packet Error Rate）を評価するため，ポアソン過程に基づく理論解析を行う．
+
+\subsection{トラフィックモデル}
+各スロット内に生起するパケット数 $k$ の確率は，ネットワーク全体の平均トラフィック密度 $G$ を用いて表される．
+平均トラフィック密度 $G$ と各スロット内に生起するパケット数 $k$ の確率は，それぞれ以下のように表される．
+\begin{equation}
+    G = \frac{N T_{\text{pk}}}{T_{\text{int}} N_{\text{ch}}}
+\end{equation}
+\begin{equation}
+    P(k) = \frac{G^k e^{-G}}{k!}
+\end{equation}
+ここで，$N$は全端末数，$T_{\text{int}}$はパケット発生間隔，$T_{\text{pk}}$はパケット伝送時間，$N_{\text{ch}}$は使用可能なチャネル数である．
+
+\subsection{LBTによる送信抑制モデル}
+LBT（Listen Before Talk）を併用する場合，送信前にチャネルがビジーと判定され，送信が抑制（ブロック）される確率 $P_{\text{block}}$ を考慮する必要がある．キャリアセンスの検知範囲 $R_{\text{cs}}$ 内に存在する送信待機端末数の期待値を $M$ とすると，スロット化システムにおけるブロック確率は次のように近似される．
+\begin{equation}
+    P_{\text{block}} = 1 - \frac{1 - e^{-M}}{M}
+\end{equation}
+これにより，実際に空中に送出されるパケットの生起密度（Attempt Rate）は，元の生起密度に対して $(1 - P_{\text{block}})$ の係数がかかった値となる．
+
+\subsection{キャプチャ効果と成功確率}
+同時送信された $k$ 個のパケットのうち，所望のパケットがゲートウェイで受信成功する条件は，受信信号電力 $P_0$ と干渉信号電力の合計 $\sum_{i=1}^{k-1} P_i$ およびノイズ電力 $P_n$ に対して，以下のSINR（Signal-to-Interference-plus-Noise Ratio）条件を満たすことである．
+\begin{equation}
+    \text{SINR} = \frac{P_0}{\sum_{i=1}^{k-1} P_i + P_n} \ge \gamma_{\text{th}}
+\end{equation}
+ここで，$\gamma_{\text{th}}$ は使用するSF（Spreading Factor）に依存するキャプチャ閾値である．端末がエリア内に一様に分布していると仮定し，各パケットの受信電力が距離減衰およびシャドウイングの影響を受ける場合， $k$ 個の衝突が発生した際の条件付き成功確率 $P_{\text{succ}}(k)$ はモンテカルロ法により数値的に算出される．
+
+最終的なシステム全体のパケット成功率 $S$ は，全生起パケット数に対する期待値として次のように求められる．
+\begin{equation}
+    S = \sum_{k=1}^{\infty} P(k) \cdot (1 - P_{\text{block}}) \cdot P_{\text{succ}}(k)
+\end{equation}
+これより，パケット不達率は $PER = 1 - S$ として定義される．
+
+\section{まとめ}
+本稿では，広帯域信号を利用した時間同期によるスロット化LoRaWANを提案し，計算機シミュレーションによりその特性を評価した．
+
+\begingroup
+\scriptsize
+\bibliographystyle{jIEEEtran}
+\bibliography{bibtex}
+\endgroup
+\end{document}

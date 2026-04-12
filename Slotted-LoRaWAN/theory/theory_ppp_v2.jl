@@ -25,7 +25,7 @@ R_MAX = 500.0          # エリア半径 (m) (Match Prop.jl default)
 TX_POWER_DBM = 13.0
 PATH_LOSS_EXP = 2.7
 REF_PATH_LOSS_DB = 31.65 # 20*log10(0.92e9) - 147.55
-SHADOWING_STD_DB = 8.0   
+SHADOWING_STD_DB = 0.0  # Prop.jlのパラメータと合わせる
 
 # Capture & LBT Thresholds
 CS_THRESHOLD_DBM = -80.0
@@ -40,11 +40,10 @@ MEAN_INTERVAL_SEC = 30.0
 NUM_CHANNELS = 8
 N_RANGE = 100:100:500 
 SYNC_RATES = [1.0]
-BEACON_INTERVAL_SEC = 0.200 # New constant to keep track
 
 # --- 物理レイヤ設定 (シミュレータと同期) ---
-ENABLE_CARRIER_SENSE = false
-ENABLE_CAPTURE_EFFECT = false
+ENABLE_CARRIER_SENSE = true
+ENABLE_CAPTURE_EFFECT = true
 
 # ==========================================
 # Derived Constants
@@ -69,7 +68,7 @@ For alpha=2.7, SIR=6dB:
   k=1: ~0.18 (Strongest of 2 survives)
   k>=2: approx 0.18 / k^1.2
 """
-function P_capture_with_k_interferers(k, alpha, sir_db, enable_capture=true)
+function P_capture_with_k_interferers(k, alpha, sir_db, enable_capture)
     if k == 0 return 1.0 end
     if !enable_capture return 0.0 end # キャプチャなし：1つでも衝突があれば失敗
     return 0.18 / (k^1.3)
@@ -189,28 +188,7 @@ for sync_rate in SYNC_RATES
     
     for N in N_RANGE
         # 1. Traffic Load Parameters
-        SLOT_LENGTH_SEC = 0.100 # 100ms (April 8 state)Main Processing
-# ==========================================
-
-println("="^60)
-println("  Refined Theory (Poisson-Discrete Model)")
-println("="^60)
-
-lora_params = create_lora_params(SF, PAYLOAD_BYTES)
-airtime_ms = calculate_lora_airtime(lora_params)
-airtime_sec = airtime_ms / 1000.0
-
-output_dir = joinpath(@__DIR__, "..", "results", "analysis")
-mkpath(output_dir)
-timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
-
-for sync_rate in SYNC_RATES
-    println("\nAnalyzing Sync Rate: $(sync_rate * 100)%")
-    df = DataFrame(num_terminals=Float64[], one_shot_per=Float64[], attempt_per=Float64[], retry_per=Float64[], cs_block_prob=Float64[])
-    
-    for N in N_RANGE
-        # 1. Traffic Load Parameters
-        SLOT_LENGTH_SEC = 0.200 # 200ms (Matches Prop.jl slots)
+        SLOT_LENGTH_SEC = 0.200 # 200ms (Matches Prop.jl slot200ms)
         
         # Baseline Airtime G (for Async and LBT)
         G = (N / MEAN_INTERVAL_SEC * airtime_sec) / NUM_CHANNELS
@@ -219,7 +197,7 @@ for sync_rate in SYNC_RATES
         
         # MAC-level traffic density (for slotted collisions)
         # For synchronized packets, the vulnerability window is exactly the slot length
-        G_sync_slot = (N * sync_rate / MEAN_INTERVAL_SEC * SLOT_LENGTH_SEC) / NUM_CHANNELS
+        G_sync_slot = (N * sync_rate / MEAN_INTERVAL_SEC * 100e-3) / NUM_CHANNELS
         
         # 2. LBT Suppression (Updated with Edge Effect Correction)
         # S_EFF_CS = ENABLE_CARRIER_SENSE ? calculate_effective_cs_area(R_MAX, TX_POWER_DBM, CS_THRESHOLD_DBM, REF_PATH_LOSS_DB, PATH_LOSS_EXP, SHADOWING_STD_DB) : 0.0
@@ -239,11 +217,12 @@ for sync_rate in SYNC_RATES
         # 3. Capture Success Rate (Poisson Sum)
         p_succ_sync = 0.0
         
-        # Synced packets are vulnerable to:
-        # 1. Other sync packets in the SAME 100ms slot (G_active_sync_slot)
-        # 2. Async packets that span into the slot (T_slot + T_airtime window)
-        G_async_vuln = (N * (1.0 - sync_rate) / MEAN_INTERVAL_SEC * (SLOT_LENGTH_SEC + airtime_sec)) / NUM_CHANNELS * p_lbt
-        G_total_interf_sync = G_active_sync_slot + G_async_vuln
+        # CS有効時、送信中のノードAに干渉してくるのはAを感知できないhidden nodeのみ。
+        # CSで検知できる範囲のノードはAの送信を感知して延期するため干渉=0とする。
+        # Sync packets: interference from hidden sync nodes + hidden async nodes overlapping the slot
+        G_hidden_sync = G_sync_slot * (1.0 - area_ratio)
+        G_hidden_async_vuln = (N * (1.0 - sync_rate) / MEAN_INTERVAL_SEC * (SLOT_LENGTH_SEC + airtime_sec)) / NUM_CHANNELS * (1.0 - area_ratio)
+        G_total_interf_sync = G_hidden_sync + G_hidden_async_vuln
         
         for k in 0:20
             p_k = exp(-G_total_interf_sync) * (G_total_interf_sync^k) / factorial(big(k))
@@ -251,29 +230,24 @@ for sync_rate in SYNC_RATES
         end
         
         # For Async packets, they are Pure ALOHA (No Slot) -> 2T window vulnerability.
-        G_total_interf_async = 2 * (G_active_sync + G_active_async)
+        # Similarly, only hidden nodes contribute to interference.
+        G_total_interf_async = 2 * (G_sync * (1.0 - area_ratio) + G_async * (1.0 - area_ratio))
         p_succ_async = exp(-G_total_interf_async)
         
         # --- 4. Final Aggregation ---
         p_succ_total = sync_rate * p_succ_sync + (1.0 - sync_rate) * p_succ_async
 
-        # --- 5. Output Collection ---
+        # --- 5. PER Definitions ---
         
-        # A. One-Shot PER (No Retry): LBT failure counts as loss. 
+        # A. One-shot PER: LBT failure (= back-off) + collision loss
         one_shot_per = 1.0 - (p_lbt * p_succ_total)
         
-        # B. Attempt-only PER (Given it was sent)
+        # B. Attempt PER (= 全送信パケット中でGWに届かなかった割合)
+        # CS有効時の干渉は hidden node のみなので p_succ_total がそれを反映済み
         attempt_per = 1.0 - p_succ_total
         
-        # C. Retry PER (Persistent failure rate)
-        # Based on average number of hidden nodes
-        G_hidden_total = G_sync_slot * (1.0 - area_ratio)
-        p_succ_retry = 0.0
-        for k in 0:20
-            p_k = exp(-G_hidden_total) * (G_hidden_total^k) / factorial(big(k))
-            p_succ_retry += Float64(p_k) * P_capture_with_k_interferers(k, PATH_LOSS_EXP, REQUIRED_SIR_DB, ENABLE_CAPTURE_EFFECT)
-        end
-        retry_per = 1.0 - p_succ_retry
+        # C. retry_per は attempt_per と同義（CS有効時 hidden node が支配的）
+        retry_per = attempt_per
         
         push!(df, (Float64(N), one_shot_per, attempt_per, retry_per, 1.0 - p_lbt))
     end
@@ -285,10 +259,10 @@ for sync_rate in SYNC_RATES
     row_500 = df[df.num_terminals .== 500, :]
     if !isempty(row_500)
         @printf("  - N=500: \n")
-        @printf("    * One-Shot PER:  %.4f (LBT failure + Collision)\n", row_500.one_shot_per[1])
-        @printf("    * Attempt PER:   %.4f (Prob success given sent)\n", row_500.attempt_per[1])
-        @printf("    * Retry PER:     %.4f (Hidden Nodes only)\n", row_500.retry_per[1])
-        @printf("    * CS Block Rate: %.4f (Probability of LBT busy)\n", row_500.cs_block_prob[1])
+        @printf("    * One-shot PER:       %.4f (LBT failure = loss)\n", row_500.one_shot_per[1])
+        @printf("    * Retry-aware PER:     %.4f (Hidden Nodes only, matches Prop.jl)\n", row_500.retry_per[1])
+        @printf("    * Collision-only PER:   %.4f (Attempt PER)\n", row_500.attempt_per[1])
+        @printf("    * CS Block Rate:      %.4f (Probability of transmission avoidance by CS)\n", row_500.cs_block_prob[1])
     end
 end
 

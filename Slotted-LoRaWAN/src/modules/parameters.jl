@@ -98,8 +98,8 @@ function create_integrated_params()
     # デフォルト値の設定 (Prop.jl 基準)
     num_terminals = 100
     sf = 8
-    beacon_interval_ms = 300.0
-    slot_length_ms = 100.0
+    beacon_interval_ms = 100.0
+    slot_length_ms = 200.0
     mean_event_interval_ms = 30000.0
     simulation_duration_ms = 3600000.0
     
@@ -110,7 +110,7 @@ function create_integrated_params()
     data_freq_ghz = 0.92
     
     area_size_m = 1000.0
-    shadowing_std_db = 8.0
+    shadowing_std_db = 0.0
     pass_loss_exp = 2.7
     
     signal_duration_us = 66.67
@@ -144,9 +144,9 @@ function create_integrated_params()
     force_async_mode = false
     max_buffer_size = 10
     
-    enable_carrier_sense = false
-    enable_capture_effect = false
-    target_sync_rate = 0.95
+    enable_carrier_sense = true
+    enable_capture_effect = true
+    target_sync_rate = 1.0
     
     # ACK/再送デフォルト (Prop_Theory.jl 基準)
     enable_ack = false

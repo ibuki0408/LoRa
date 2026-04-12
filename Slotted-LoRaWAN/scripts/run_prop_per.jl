@@ -2,7 +2,7 @@ using Distributed
 
 # 並列ワーカーの追加（CPUコア数に応じて自動調整）
 if nprocs() == 1
-    num_workers = min(Sys.CPU_THREADS, 8)  # 最大8ワーカー
+    num_workers = min(Sys.CPU_THREADS, 128)  # 最大8ワーカー
     addprocs(num_workers)
     println("Added $num_workers worker processes")
 end
@@ -112,7 +112,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     # 設定: ここで評価パラメータを指定
     # ============================================================
     TERMINAL_COUNTS = [100,200,300,400,500]  # 評価する端末数のリスト
-    NUM_TRIALS = 16         # 各設定での試行回数
+    NUM_TRIALS = 100         # 各設定での試行回数
     SPREADING_FACTOR = 8    # 拡散率 (7-12)
     SLOT_LENGTH_MS = 200.0   # スロット長 (ms)
     BEACON_INTERVAL_MS = 100.0  # ビーコン間隔 (ms)
@@ -120,7 +120,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     MAX_RETRIES = 3         # 最大再送回数
     MAX_BUFFER_SIZE = 10    # バッファサイズ (待ち行列の最大数)
     ENABLE_CARRIER_SENSE = true  # キャリアセンスを有効にするか
-    ENABLE_CAPTURE_EFFECT = false # キャプチャ効果を有効にするか
+    ENABLE_CAPTURE_EFFECT = true # キャプチャ効果を有効にするか
     TARGET_SYNC_RATE = 1.0     # 期待される同期成功率 (Fastモード用)
     # ============================================================
     
@@ -318,8 +318,6 @@ if abspath(PROGRAM_FILE) == @__FILE__
             total_buffer_drops = total_buffer_drops,
             total_generated = total_generated,
             buffer_drop_rate = buffer_drop_rate,
-            total_retransmissions = 0,
-            retransmission_rate = 0.0,
             mean_total_generated = mean_total_generated,
             mean_total_packets = mean_total_packets
         ))
@@ -364,11 +362,10 @@ if abspath(PROGRAM_FILE) == @__FILE__
                 "mean_throughput_bps", "std_throughput_bps",
                 "mean_norm_throughput", "std_norm_throughput",
                 "total_buffer_drops", "total_generated", "buffer_drop_rate",
-                "total_retransmissions", "retransmission_rate",
                 "mean_total_generated", "mean_total_packets"]
         println(io, join(cols, ","))
         for data in summary_data
-            @printf(io, "%d,%d,%.6f,%.6f,%.6f,%.6f,%.2f,%.6f,%.6f,%.6f,%.6f,%.2f,%.2f,%.6f,%.6f,%d,%d,%.6f,%d,%.6f,%.2f,%.2f\n",
+            @printf(io, "%d,%d,%.6f,%.6f,%.6f,%.6f,%.2f,%.6f,%.6f,%.6f,%.6f,%.2f,%.2f,%.6f,%.6f,%d,%d,%.6f,%.2f,%.2f\n",
                     data.num_terminals, data.num_trials,
                     data.mean_per, data.std_per,
                     data.mean_original_per, data.std_original_per,
@@ -378,7 +375,6 @@ if abspath(PROGRAM_FILE) == @__FILE__
                     data.mean_throughput_bps, data.std_throughput_bps,
                     data.mean_norm_throughput, data.std_norm_throughput,
                     data.total_buffer_drops, data.total_generated, data.buffer_drop_rate,
-                    data.total_retransmissions, data.retransmission_rate,
                     data.mean_total_generated, data.mean_total_packets)
         end
     end

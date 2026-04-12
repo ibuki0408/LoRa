@@ -1,4 +1,4 @@
-using Random, Statistics, Printf, DataFrames, CSV, Plots, Dates, LinearAlgebra, DSP
+using Random, Statistics, Printf, DataFrames, CSV, Dates, LinearAlgebra, DSP
 
 # ==========================================
 include(joinpath(@__DIR__, "SlottedLoRaWAN.jl"))
@@ -147,6 +147,8 @@ function run_integrated_simulation_with_params(params::IntegratedParameters)
     cs_attempts = 0
     cs_blocked = 0
     cs_blocked_distances = Float64[]
+    first_cs_blocked = 0        # 初回送信時にCSでブロックされた数
+    first_tx_seen_pids = Set{Int}()  # 既にCS試行したことのあるpid集合
     
     # SINR/SNR 閾値 (拡散率SFに依存)
     required_sir_db = 6.0
@@ -245,14 +247,20 @@ function run_integrated_simulation_with_params(params::IntegratedParameters)
                             is_busy = true
                             cs_blocked += 1
                             push!(cs_blocked_distances, dist_peer)
+                            # 初回送信でのCSブロックをカウント
+                            if !(pid in first_tx_seen_pids)
+                                first_cs_blocked += 1
+                            end
                             break
                         end
                     end
                 end
             end
             
+            # 初回CS試行済みとしてマーク
+            push!(first_tx_seen_pids, pid)
+            
             if !is_busy
-                # 送信実行
                 # 送信実行
                 
                 dur = params.packet_airtime_ms
@@ -376,6 +384,18 @@ function run_integrated_simulation_with_params(params::IntegratedParameters)
     total_failed_attempts = total_attempts - total_success_attempts
     attempt_per = total_attempts > 0 ? (total_failed_attempts / max(total_attempts, 1)) : 0.0
     
+    # 初回送信ベースのPER: CSブロック（延期）+ 初回送信での衝突
+    # 初回送信のみの送信記録を使って衝突数をカウント
+    first_attempt_tx = Dict{Int, TransmissionRecord}()  # pid -> 最初の送信記録
+    for r in attempt_tx
+        if !haskey(first_attempt_tx, r.packet_id)
+            first_attempt_tx[r.packet_id] = r
+        end
+    end
+    first_tx_collisions = count(r -> r.status != "Success", values(first_attempt_tx))
+    first_tx_total_failures = first_cs_blocked + first_tx_collisions
+    first_tx_per = original_total > 0 ? (first_tx_total_failures / original_total) : 0.0
+    
     # スループット計算
     sim_duration_s = params.simulation_duration_ms / 1000.0
     total_data_bits = original_success * params.lora_payload_bytes * 8
@@ -421,6 +441,7 @@ function run_integrated_simulation_with_params(params::IntegratedParameters)
     println("  Dropped (Buffer):    $buffer_drops")
     println("  Original Success:    $original_success")
     println("  Original PER:        $(round(original_per, digits=6))")
+    println("  First-TX PER:        $(round(first_tx_per, digits=6)) (CS block + 1st collision / generated)")
     println("  Total Attempts:      $total_attempts")
     println("  Total Collisions:    $total_failed_attempts")
     println("  Attempt PER:         $(round(attempt_per, digits=6))")
@@ -490,6 +511,7 @@ function run_integrated_simulation_with_params(params::IntegratedParameters)
         "collisions" => total_failed_attempts,       # 全衝突数
         "per" => attempt_per,                       # 試行ベースのPER
         "original_per" => original_per,             # メッセージベースの不達率 (生成数に対するロス)
+        "first_tx_per" => first_tx_per,             # 初回送信ベースPER (CSブロック+衝突 / 生成数)
         "final_reliability_per" => original_per,   # 最終的な不達率 (互換性用)
         "message_loss_rate" => original_per,        # 明示的な名前
         "buffer_drops" => buffer_drops,

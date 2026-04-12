@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  simulation:
+    build: .
+    volumes:
+      - .:/app
+    environment:
+      - JULIA_NUM_THREADS=8
+      - GKSwstype=100
+    # The default command is defined in the Dockerfile, 
+    # but you can override it here if needed:
+    # command: julia --project scripts/run_prop_per.jl
